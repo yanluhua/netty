@@ -24,11 +24,12 @@ import io.netty.channel.EventLoop;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
+import io.netty.util.concurrent.GlobalEventExecutor;
 import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.PlatformDependent;
-import io.netty.util.internal.ThrowableUtil;
 
 import java.util.Deque;
+import java.util.concurrent.Callable;
 
 import static io.netty.util.internal.ObjectUtil.*;
 
@@ -40,10 +41,8 @@ import static io.netty.util.internal.ObjectUtil.*;
  *
  */
 public class SimpleChannelPool implements ChannelPool {
-    private static final AttributeKey<SimpleChannelPool> POOL_KEY = AttributeKey.newInstance("channelPool");
-    private static final IllegalStateException FULL_EXCEPTION = ThrowableUtil.unknownStackTrace(
-            new IllegalStateException("ChannelPool full"), SimpleChannelPool.class, "releaseAndOffer(...)");
-
+    private static final AttributeKey<SimpleChannelPool> POOL_KEY =
+        AttributeKey.newInstance("io.netty.channel.pool.SimpleChannelPool");
     private final Deque<Channel> deque = PlatformDependent.newConcurrentDeque();
     private final ChannelPoolHandler handler;
     private final ChannelHealthChecker healthCheck;
@@ -160,8 +159,7 @@ public class SimpleChannelPool implements ChannelPool {
 
     @Override
     public Future<Channel> acquire(final Promise<Channel> promise) {
-        checkNotNull(promise, "promise");
-        return acquireHealthyFromPoolOrNew(promise);
+        return acquireHealthyFromPoolOrNew(checkNotNull(promise, "promise"));
     }
 
     /**
@@ -206,9 +204,10 @@ public class SimpleChannelPool implements ChannelPool {
         return promise;
     }
 
-    private void notifyConnect(ChannelFuture future, Promise<Channel> promise) {
+    private void notifyConnect(ChannelFuture future, Promise<Channel> promise) throws Exception {
         if (future.isSuccess()) {
             Channel channel = future.channel();
+            handler.channelAcquired(channel);
             if (!promise.trySuccess(channel)) {
                 // Promise was completed in the meantime (like cancelled), just release the channel again
                 release(channel);
@@ -351,16 +350,21 @@ public class SimpleChannelPool implements ChannelPool {
             handler.channelReleased(channel);
             promise.setSuccess(null);
         } else {
-            closeAndFail(channel, FULL_EXCEPTION, promise);
+            closeAndFail(channel, new IllegalStateException("ChannelPool full") {
+                @Override
+                public Throwable fillInStackTrace() {
+                    return this;
+                }
+            }, promise);
         }
     }
 
-    private static void closeChannel(Channel channel) {
+    private void closeChannel(Channel channel) {
         channel.attr(POOL_KEY).getAndSet(null);
         channel.close();
     }
 
-    private static void closeAndFail(Channel channel, Throwable cause, Promise<?> promise) {
+    private void closeAndFail(Channel channel, Throwable cause, Promise<?> promise) {
         closeChannel(channel);
         promise.tryFailure(cause);
     }
@@ -397,5 +401,21 @@ public class SimpleChannelPool implements ChannelPool {
             // Just ignore any errors that are reported back from close().
             channel.close().awaitUninterruptibly();
         }
+    }
+
+    /**
+     * Closes the pool in an async manner.
+     *
+     * @return Future which represents completion of the close task
+     */
+    public Future<Void> closeAsync() {
+        // Execute close asynchronously in case this is being invoked on an eventloop to avoid blocking
+        return GlobalEventExecutor.INSTANCE.submit(new Callable<Void>() {
+            @Override
+            public Void call() throws Exception {
+                close();
+                return null;
+            }
+        });
     }
 }

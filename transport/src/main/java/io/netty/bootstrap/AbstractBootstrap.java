@@ -26,10 +26,11 @@ import io.netty.channel.DefaultChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.ReflectiveChannelFactory;
-import io.netty.util.internal.SocketUtils;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.GlobalEventExecutor;
+import io.netty.util.internal.ObjectUtil;
+import io.netty.util.internal.SocketUtils;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.logging.InternalLogger;
 
@@ -37,8 +38,10 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * {@link AbstractBootstrap} is a helper class that makes it easy to bootstrap a {@link Channel}. It support
@@ -48,13 +51,20 @@ import java.util.Map;
  * transports such as datagram (UDP).</p>
  */
 public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C extends Channel> implements Cloneable {
+    @SuppressWarnings("unchecked")
+    static final Map.Entry<ChannelOption<?>, Object>[] EMPTY_OPTION_ARRAY = new Map.Entry[0];
+    @SuppressWarnings("unchecked")
+    static final Map.Entry<AttributeKey<?>, Object>[] EMPTY_ATTRIBUTE_ARRAY = new Map.Entry[0];
 
     volatile EventLoopGroup group;
     @SuppressWarnings("deprecation")
     private volatile ChannelFactory<? extends C> channelFactory;
     private volatile SocketAddress localAddress;
+
+    // The order in which ChannelOptions are applied is important they may depend on each other for validation
+    // purposes.
     private final Map<ChannelOption<?>, Object> options = new LinkedHashMap<ChannelOption<?>, Object>();
-    private final Map<AttributeKey<?>, Object> attrs = new LinkedHashMap<AttributeKey<?>, Object>();
+    private final Map<AttributeKey<?>, Object> attrs = new ConcurrentHashMap<AttributeKey<?>, Object>();
     private volatile ChannelHandler handler;
 
     AbstractBootstrap() {
@@ -69,9 +79,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
         synchronized (bootstrap.options) {
             options.putAll(bootstrap.options);
         }
-        synchronized (bootstrap.attrs) {
-            attrs.putAll(bootstrap.attrs);
-        }
+        attrs.putAll(bootstrap.attrs);
     }
 
     /**
@@ -79,9 +87,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
      * {@link Channel}
      */
     public B group(EventLoopGroup group) {
-        if (group == null) {
-            throw new NullPointerException("group");
-        }
+        ObjectUtil.checkNotNull(group, "group");
         if (this.group != null) {
             throw new IllegalStateException("group set already");
         }
@@ -100,10 +106,9 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
      * {@link Channel} implementation has no no-args constructor.
      */
     public B channel(Class<? extends C> channelClass) {
-        if (channelClass == null) {
-            throw new NullPointerException("channelClass");
-        }
-        return channelFactory(new ReflectiveChannelFactory<C>(channelClass));
+        return channelFactory(new ReflectiveChannelFactory<C>(
+                ObjectUtil.checkNotNull(channelClass, "channelClass")
+        ));
     }
 
     /**
@@ -111,9 +116,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
      */
     @Deprecated
     public B channelFactory(ChannelFactory<? extends C> channelFactory) {
-        if (channelFactory == null) {
-            throw new NullPointerException("channelFactory");
-        }
+        ObjectUtil.checkNotNull(channelFactory, "channelFactory");
         if (this.channelFactory != null) {
             throw new IllegalStateException("channelFactory set already");
         }
@@ -168,15 +171,11 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
      * created. Use a value of {@code null} to remove a previous set {@link ChannelOption}.
      */
     public <T> B option(ChannelOption<T> option, T value) {
-        if (option == null) {
-            throw new NullPointerException("option");
-        }
-        if (value == null) {
-            synchronized (options) {
+        ObjectUtil.checkNotNull(option, "option");
+        synchronized (options) {
+            if (value == null) {
                 options.remove(option);
-            }
-        } else {
-            synchronized (options) {
+            } else {
                 options.put(option, value);
             }
         }
@@ -188,17 +187,11 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
      * {@code null}, the attribute of the specified {@code key} is removed.
      */
     public <T> B attr(AttributeKey<T> key, T value) {
-        if (key == null) {
-            throw new NullPointerException("key");
-        }
+        ObjectUtil.checkNotNull(key, "key");
         if (value == null) {
-            synchronized (attrs) {
-                attrs.remove(key);
-            }
+            attrs.remove(key);
         } else {
-            synchronized (attrs) {
-                attrs.put(key, value);
-            }
+            attrs.put(key, value);
         }
         return self();
     }
@@ -272,10 +265,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
      */
     public ChannelFuture bind(SocketAddress localAddress) {
         validate();
-        if (localAddress == null) {
-            throw new NullPointerException("localAddress");
-        }
-        return doBind(localAddress);
+        return doBind(ObjectUtil.checkNotNull(localAddress, "localAddress"));
     }
 
     private ChannelFuture doBind(final SocketAddress localAddress) {
@@ -375,10 +365,7 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
      * the {@link ChannelHandler} to use for serving the requests.
      */
     public B handler(ChannelHandler handler) {
-        if (handler == null) {
-            throw new NullPointerException("handler");
-        }
-        this.handler = handler;
+        this.handler = ObjectUtil.checkNotNull(handler, "handler");
         return self();
     }
 
@@ -398,15 +385,10 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
      */
     public abstract AbstractBootstrapConfig<B, C> config();
 
-    static <K, V> Map<K, V> copiedMap(Map<K, V> map) {
-        final Map<K, V> copied;
-        synchronized (map) {
-            if (map.isEmpty()) {
-                return Collections.emptyMap();
-            }
-            copied = new LinkedHashMap<K, V>(map);
+    final Map.Entry<ChannelOption<?>, Object>[] newOptionsArray() {
+        synchronized (options) {
+            return options.entrySet().toArray(EMPTY_OPTION_ARRAY);
         }
-        return Collections.unmodifiableMap(copied);
     }
 
     final Map<ChannelOption<?>, Object> options0() {
@@ -431,17 +413,27 @@ public abstract class AbstractBootstrap<B extends AbstractBootstrap<B, C>, C ext
     }
 
     final Map<ChannelOption<?>, Object> options() {
-        return copiedMap(options);
+        synchronized (options) {
+            return copiedMap(options);
+        }
     }
 
     final Map<AttributeKey<?>, Object> attrs() {
         return copiedMap(attrs);
     }
 
-    static void setChannelOptions(
-            Channel channel, Map<ChannelOption<?>, Object> options, InternalLogger logger) {
-        for (Map.Entry<ChannelOption<?>, Object> e: options.entrySet()) {
-            setChannelOption(channel, e.getKey(), e.getValue(), logger);
+    static <K, V> Map<K, V> copiedMap(Map<K, V> map) {
+        if (map.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        return Collections.unmodifiableMap(new HashMap<K, V>(map));
+    }
+
+    static void setAttributes(Channel channel, Map.Entry<AttributeKey<?>, Object>[] attrs) {
+        for (Map.Entry<AttributeKey<?>, Object> e: attrs) {
+            @SuppressWarnings("unchecked")
+            AttributeKey<Object> key = (AttributeKey<Object>) e.getKey();
+            channel.attr(key).set(e.getValue());
         }
     }
 

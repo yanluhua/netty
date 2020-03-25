@@ -22,7 +22,9 @@ import io.netty.handler.codec.EncoderException;
 import io.netty.util.CharsetUtil;
 import org.junit.Test;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 public class SmtpRequestEncoderTest {
 
@@ -34,6 +36,21 @@ public class SmtpRequestEncoderTest {
     @Test
     public void testEncodeHelo() {
         testEncode(SmtpRequests.helo("localhost"), "HELO localhost\r\n");
+    }
+
+    @Test
+    public void testEncodeAuth() {
+        testEncode(SmtpRequests.auth("LOGIN"), "AUTH LOGIN\r\n");
+    }
+
+    @Test
+    public void testEncodeAuthWithParameter() {
+        testEncode(SmtpRequests.auth("PLAIN", "dGVzdAB0ZXN0ADEyMzQ="), "AUTH PLAIN dGVzdAB0ZXN0ADEyMzQ=\r\n");
+    }
+
+    @Test
+    public void testEncodeEmpty() {
+        testEncode(SmtpRequests.empty("dGVzdAB0ZXN0ADEyMzQ="),  "dGVzdAB0ZXN0ADEyMzQ=\r\n");
     }
 
     @Test
@@ -92,8 +109,12 @@ public class SmtpRequestEncoderTest {
     @Test(expected = EncoderException.class)
     public void testThrowsIfContentExpected() {
         EmbeddedChannel channel = new EmbeddedChannel(new SmtpRequestEncoder());
-        assertTrue(channel.writeOutbound(SmtpRequests.data()));
-        channel.writeOutbound(SmtpRequests.noop());
+        try {
+            assertTrue(channel.writeOutbound(SmtpRequests.data()));
+            channel.writeOutbound(SmtpRequests.noop());
+        } finally {
+            channel.finishAndReleaseAll();
+        }
     }
 
     @Test

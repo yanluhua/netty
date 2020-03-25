@@ -15,6 +15,7 @@
  */
 package io.netty.util.internal;
 
+import io.netty.util.CharsetUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.jctools.queues.MpscArrayQueue;
@@ -28,19 +29,28 @@ import org.jctools.queues.atomic.SpscLinkedAtomicQueue;
 import org.jctools.util.Pow2;
 import org.jctools.util.UnsafeAccess;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentMap;
@@ -75,6 +85,7 @@ public final class PlatformDependent {
     private static final boolean IS_WINDOWS = isWindows0();
     private static final boolean IS_OSX = isOsx0();
     private static final boolean IS_J9_JVM = isJ9Jvm0();
+    private static final boolean IS_IVKVM_DOT_NET = isIkvmDotNet0();
 
     private static final boolean MAYBE_SUPER_USER;
 
@@ -96,6 +107,10 @@ public final class PlatformDependent {
     private static final String NORMALIZED_ARCH = normalizeArch(SystemPropertyUtil.get("os.arch", ""));
     private static final String NORMALIZED_OS = normalizeOs(SystemPropertyUtil.get("os.name", ""));
 
+    // keep in sync with maven's pom.xml via os.detection.classifierWithLikes!
+    private static final String[] ALLOWED_LINUX_OS_CLASSIFIERS = {"fedora", "suse", "arch"};
+    private static final Set<String> LINUX_OS_CLASSIFIERS;
+
     private static final int ADDRESS_SIZE = addressSize0();
     private static final boolean USE_DIRECT_BUFFER_NO_CLEANER;
     private static final AtomicLong DIRECT_MEMORY_COUNTER;
@@ -103,7 +118,10 @@ public final class PlatformDependent {
     private static final ThreadLocalRandomProvider RANDOM_PROVIDER;
     private static final Cleaner CLEANER;
     private static final int UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD;
-
+    // For specifications, see https://www.freedesktop.org/software/systemd/man/os-release.html
+    private static final String[] OS_RELEASE_FILES = {"/etc/os-release", "/usr/lib/os-release"};
+    private static final String LINUX_ID_PREFIX = "ID=";
+    private static final String LINUX_ID_LIKE_PREFIX = "ID_LIKE=";
     public static final boolean BIG_ENDIAN_NATIVE_ORDER = ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN;
 
     private static final Cleaner NOOP = new Cleaner() {
@@ -117,6 +135,7 @@ public final class PlatformDependent {
         if (javaVersion() >= 7) {
             RANDOM_PROVIDER = new ThreadLocalRandomProvider() {
                 @Override
+                @SuppressJava6Requirement(reason = "Usage guarded by java version check")
                 public Random current() {
                     return java.util.concurrent.ThreadLocalRandom.current();
                 }
@@ -195,6 +214,63 @@ public final class PlatformDependent {
                     "Unless explicitly requested, heap buffer will always be preferred to avoid potential system " +
                     "instability.");
         }
+
+        final Set<String> allowedClassifiers = Collections.unmodifiableSet(
+                new HashSet<String>(Arrays.asList(ALLOWED_LINUX_OS_CLASSIFIERS)));
+        final Set<String> availableClassifiers = new LinkedHashSet<String>();
+        for (final String osReleaseFileName : OS_RELEASE_FILES) {
+            final File file = new File(osReleaseFileName);
+            boolean found = AccessController.doPrivileged(new PrivilegedAction<Boolean>() {
+                @Override
+                public Boolean run() {
+                    try {
+                        if (file.exists()) {
+                            BufferedReader reader = null;
+                            try {
+                                reader = new BufferedReader(
+                                        new InputStreamReader(
+                                                new FileInputStream(file), CharsetUtil.UTF_8));
+
+                                String line;
+                                while ((line = reader.readLine()) != null) {
+                                    if (line.startsWith(LINUX_ID_PREFIX)) {
+                                        String id = normalizeOsReleaseVariableValue(
+                                                line.substring(LINUX_ID_PREFIX.length()));
+                                        addClassifier(allowedClassifiers, availableClassifiers, id);
+                                    } else if (line.startsWith(LINUX_ID_LIKE_PREFIX)) {
+                                        line = normalizeOsReleaseVariableValue(
+                                                line.substring(LINUX_ID_LIKE_PREFIX.length()));
+                                        addClassifier(allowedClassifiers, availableClassifiers, line.split("[ ]+"));
+                                    }
+                                }
+                            } catch (SecurityException e) {
+                                logger.debug("Unable to read {}", osReleaseFileName, e);
+                            } catch (IOException e) {
+                                logger.debug("Error while reading content of {}", osReleaseFileName, e);
+                            } finally {
+                                if (reader != null) {
+                                    try {
+                                        reader.close();
+                                    } catch (IOException ignored) {
+                                        // Ignore
+                                    }
+                                }
+                            }
+                            // specification states we should only fall back if /etc/os-release does not exist
+                            return true;
+                        }
+                    } catch (SecurityException e) {
+                        logger.debug("Unable to check if {} exists", osReleaseFileName, e);
+                    }
+                    return false;
+                }
+            });
+
+            if (found) {
+                break;
+            }
+        }
+        LINUX_OS_CLASSIFIERS = Collections.unmodifiableSet(availableClassifiers);
     }
 
     public static boolean hasDirectBufferNoCleanerConstructor() {
@@ -286,6 +362,16 @@ public final class PlatformDependent {
      */
     public static long maxDirectMemory() {
         return DIRECT_MEMORY_LIMIT;
+    }
+
+    /**
+     * Returns the current memory reserved for direct buffer allocation.
+     * This method returns -1 in case that a value is not available.
+     *
+     * @see #maxDirectMemory()
+     */
+    public static long usedDirectMemory() {
+        return DIRECT_MEMORY_COUNTER != null ? DIRECT_MEMORY_COUNTER.get() : -1;
     }
 
     /**
@@ -895,6 +981,7 @@ public final class PlatformDependent {
     /**
      * Returns a new concurrent {@link Deque}.
      */
+    @SuppressJava6Requirement(reason = "Usage guarded by java version check")
     public static <C> Deque<C> newConcurrentDeque() {
         if (javaVersion() < 7) {
             return new LinkedBlockingDeque<C>();
@@ -943,6 +1030,12 @@ public final class PlatformDependent {
             logger.debug("sun.misc.Unsafe: unavailable (Android)");
             return new UnsupportedOperationException("sun.misc.Unsafe: unavailable (Android)");
         }
+
+        if (isIkvmDotNet()) {
+            logger.debug("sun.misc.Unsafe: unavailable (IKVM.NET)");
+            return new UnsupportedOperationException("sun.misc.Unsafe: unavailable (IKVM.NET)");
+        }
+
         Throwable cause = PlatformDependent0.getUnsafeUnavailabilityCause();
         if (cause != null) {
             return cause;
@@ -970,6 +1063,18 @@ public final class PlatformDependent {
     private static boolean isJ9Jvm0() {
         String vmName = SystemPropertyUtil.get("java.vm.name", "").toLowerCase();
         return vmName.startsWith("ibm j9") || vmName.startsWith("eclipse openj9");
+    }
+
+    /**
+     * Returns {@code true} if the running JVM is <a href="https://www.ikvm.net">IKVM.NET</a>, {@code false} otherwise.
+     */
+    public static boolean isIkvmDotNet() {
+        return IS_IVKVM_DOT_NET;
+    }
+
+    private static boolean isIkvmDotNet0() {
+        String vmName = SystemPropertyUtil.get("java.vm.name", "").toUpperCase(Locale.US);
+        return vmName.equals("IKVM.NET");
     }
 
     private static long maxDirectMemory0() {
@@ -1159,8 +1264,8 @@ public final class PlatformDependent {
 
         // Last resort: guess from VM name and then fall back to most common 64-bit mode.
         String vm = SystemPropertyUtil.get("java.vm.name", "").toLowerCase(Locale.US);
-        Pattern BIT_PATTERN = Pattern.compile("([1-9][0-9]+)-?bit");
-        Matcher m = BIT_PATTERN.matcher(vm);
+        Pattern bitPattern = Pattern.compile("([1-9][0-9]+)-?bit");
+        Matcher m = bitPattern.matcher(vm);
         if (m.find()) {
             return Integer.parseInt(m.group(1));
         } else {
@@ -1243,6 +1348,30 @@ public final class PlatformDependent {
 
     public static String normalizedOs() {
         return NORMALIZED_OS;
+    }
+
+    public static Set<String> normalizedLinuxClassifiers() {
+        return LINUX_OS_CLASSIFIERS;
+    }
+
+    /**
+     * Adds only those classifier strings to <tt>dest</tt> which are present in <tt>allowed</tt>.
+     *
+     * @param allowed          allowed classifiers
+     * @param dest             destination set
+     * @param maybeClassifiers potential classifiers to add
+     */
+    private static void addClassifier(Set<String> allowed, Set<String> dest, String... maybeClassifiers) {
+        for (String id : maybeClassifiers) {
+            if (allowed.contains(id)) {
+                dest.add(id);
+            }
+        }
+    }
+
+    private static String normalizeOsReleaseVariableValue(String value) {
+        // Variable assignment values may be enclosed in double or single quotes.
+        return value.trim().replaceAll("[\"']", "");
     }
 
     private static String normalize(String value) {

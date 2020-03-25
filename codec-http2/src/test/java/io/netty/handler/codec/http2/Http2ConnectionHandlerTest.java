@@ -29,6 +29,7 @@ import io.netty.channel.DefaultChannelConfig;
 import io.netty.channel.DefaultChannelPromise;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http2.Http2CodecUtil.SimpleChannelPromiseAggregator;
+import io.netty.handler.codec.http2.Http2Exception.ShutdownHint;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.GenericFutureListener;
@@ -40,6 +41,7 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
@@ -48,9 +50,11 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.netty.buffer.Unpooled.copiedBuffer;
 import static io.netty.handler.codec.http2.Http2CodecUtil.connectionPrefaceBuf;
+import static io.netty.handler.codec.http2.Http2Error.CANCEL;
 import static io.netty.handler.codec.http2.Http2Error.PROTOCOL_ERROR;
 import static io.netty.handler.codec.http2.Http2Error.STREAM_CLOSED;
 import static io.netty.handler.codec.http2.Http2Stream.State.CLOSED;
@@ -722,12 +726,41 @@ public class Http2ConnectionHandlerTest {
     }
 
     @Test
+    public void gracefulShutdownTimeoutWhenConnectionErrorHardShutdownTest() throws Exception {
+        gracefulShutdownTimeoutWhenConnectionErrorTest0(ShutdownHint.HARD_SHUTDOWN);
+    }
+
+    @Test
+    public void gracefulShutdownTimeoutWhenConnectionErrorGracefulShutdownTest() throws Exception {
+        gracefulShutdownTimeoutWhenConnectionErrorTest0(ShutdownHint.GRACEFUL_SHUTDOWN);
+    }
+
+    private void gracefulShutdownTimeoutWhenConnectionErrorTest0(ShutdownHint hint) throws Exception {
+        handler = newHandler();
+        final long expectedMillis = 1234;
+        handler.gracefulShutdownTimeoutMillis(expectedMillis);
+        Http2Exception exception = new Http2Exception(PROTOCOL_ERROR, "Test error", hint);
+        handler.onConnectionError(ctx, false, exception, exception);
+        verify(executor, atLeastOnce()).schedule(any(Runnable.class), eq(expectedMillis), eq(TimeUnit.MILLISECONDS));
+    }
+
+    @Test
     public void gracefulShutdownTimeoutTest() throws Exception {
         handler = newHandler();
         final long expectedMillis = 1234;
         handler.gracefulShutdownTimeoutMillis(expectedMillis);
         handler.close(ctx, promise);
-        verify(executor).schedule(any(Runnable.class), eq(expectedMillis), eq(TimeUnit.MILLISECONDS));
+        verify(executor, atLeastOnce()).schedule(any(Runnable.class), eq(expectedMillis), eq(TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    public void gracefulShutdownTimeoutNoActiveStreams() throws Exception {
+        handler = newHandler();
+        when(connection.numActiveStreams()).thenReturn(0);
+        final long expectedMillis = 1234;
+        handler.gracefulShutdownTimeoutMillis(expectedMillis);
+        handler.close(ctx, promise);
+        verify(executor, atLeastOnce()).schedule(any(Runnable.class), eq(expectedMillis), eq(TimeUnit.MILLISECONDS));
     }
 
     @Test
@@ -736,6 +769,51 @@ public class Http2ConnectionHandlerTest {
         handler.gracefulShutdownTimeoutMillis(-1);
         handler.close(ctx, promise);
         verify(executor, never()).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
+    }
+
+    @Test
+    public void writeMultipleRstFramesForSameStream() throws Exception {
+        handler = newHandler();
+        when(stream.id()).thenReturn(STREAM_ID);
+
+        final AtomicBoolean resetSent = new AtomicBoolean();
+        when(stream.resetSent()).then(new Answer<Http2Stream>() {
+            @Override
+            public Http2Stream answer(InvocationOnMock invocationOnMock) {
+                resetSent.set(true);
+                return stream;
+            }
+        });
+        when(stream.isResetSent()).then(new Answer<Boolean>() {
+            @Override
+            public Boolean answer(InvocationOnMock invocationOnMock) {
+                return resetSent.get();
+            }
+        });
+        when(frameWriter.writeRstStream(eq(ctx), eq(STREAM_ID), anyLong(), any(ChannelPromise.class)))
+                .then(new Answer<ChannelFuture>() {
+                    @Override
+                    public ChannelFuture answer(InvocationOnMock invocationOnMock) throws Throwable {
+                        ChannelPromise promise = invocationOnMock.getArgument(3);
+                        return promise.setSuccess();
+                    }
+                });
+
+        ChannelPromise promise =
+                new DefaultChannelPromise(channel, ImmediateEventExecutor.INSTANCE);
+        final ChannelPromise promise2 =
+                new DefaultChannelPromise(channel, ImmediateEventExecutor.INSTANCE);
+        promise.addListener(new ChannelFutureListener() {
+            @Override
+            public void operationComplete(ChannelFuture future) {
+                handler.resetStream(ctx, STREAM_ID, STREAM_CLOSED.code(), promise2);
+            }
+        });
+
+        handler.resetStream(ctx, STREAM_ID, CANCEL.code(), promise);
+        verify(frameWriter).writeRstStream(eq(ctx), eq(STREAM_ID), anyLong(), any(ChannelPromise.class));
+        assertTrue(promise.isSuccess());
+        assertTrue(promise2.isSuccess());
     }
 
     private void writeRstStreamUsingVoidPromise(int streamId) throws Exception {

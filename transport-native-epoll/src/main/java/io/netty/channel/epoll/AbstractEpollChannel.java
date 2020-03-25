@@ -38,7 +38,6 @@ import io.netty.channel.unix.FileDescriptor;
 import io.netty.channel.unix.Socket;
 import io.netty.channel.unix.UnixChannel;
 import io.netty.util.ReferenceCountUtil;
-import io.netty.util.internal.ThrowableUtil;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -57,8 +56,6 @@ import static io.netty.channel.unix.UnixChannelUtil.computeRemoteAddr;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 
 abstract class AbstractEpollChannel extends AbstractChannel implements UnixChannel {
-    private static final ClosedChannelException DO_CLOSE_CLOSED_CHANNEL_EXCEPTION = ThrowableUtil.unknownStackTrace(
-            new ClosedChannelException(), AbstractEpollChannel.class, "doClose()");
     private static final ChannelMetadata METADATA = new ChannelMetadata(false);
     final LinuxSocket socket;
     /**
@@ -84,24 +81,24 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
 
     AbstractEpollChannel(Channel parent, LinuxSocket fd, boolean active) {
         super(parent);
-        socket = checkNotNull(fd, "fd");
+        this.socket = checkNotNull(fd, "fd");
         this.active = active;
         if (active) {
             // Directly cache the remote and local addresses
             // See https://github.com/netty/netty/issues/2359
-            local = fd.localAddress();
-            remote = fd.remoteAddress();
+            this.local = fd.localAddress();
+            this.remote = fd.remoteAddress();
         }
     }
 
     AbstractEpollChannel(Channel parent, LinuxSocket fd, SocketAddress remote) {
         super(parent);
-        socket = checkNotNull(fd, "fd");
-        active = true;
+        this.socket = checkNotNull(fd, "fd");
+        this.active = true;
         // Directly cache the remote and local addresses
         // See https://github.com/netty/netty/issues/2359
         this.remote = remote;
-        local = fd.localAddress();
+        this.local = fd.localAddress();
     }
 
     static boolean isSoErrorZero(Socket fd) {
@@ -158,7 +155,7 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
             ChannelPromise promise = connectPromise;
             if (promise != null) {
                 // Use tryFailure() instead of setFailure() to avoid the race against cancel().
-                promise.tryFailure(DO_CLOSE_CLOSED_CHANNEL_EXCEPTION);
+                promise.tryFailure(new ClosedChannelException());
                 connectPromise = null;
             }
 
@@ -192,6 +189,11 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
         } finally {
             socket.close();
         }
+    }
+
+    void resetCachedAddresses() {
+        local = socket.localAddress();
+        remote = socket.remoteAddress();
     }
 
     @Override
@@ -237,6 +239,9 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
     }
 
     private static boolean isAllowHalfClosure(ChannelConfig config) {
+        if (config instanceof EpollDomainSocketChannelConfig) {
+            return ((EpollDomainSocketChannelConfig) config).isAllowHalfClosure();
+        }
         return config instanceof SocketChannelConfig &&
                 ((SocketChannelConfig) config).isAllowHalfClosure();
     }

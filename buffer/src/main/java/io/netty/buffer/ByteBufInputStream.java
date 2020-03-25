@@ -16,6 +16,7 @@
 package io.netty.buffer;
 
 import io.netty.util.ReferenceCounted;
+import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.StringUtil;
 
 import java.io.DataInput;
@@ -102,9 +103,7 @@ public class ByteBufInputStream extends InputStream implements DataInput {
      *            {@code writerIndex}
      */
     public ByteBufInputStream(ByteBuf buffer, int length, boolean releaseOnClose) {
-        if (buffer == null) {
-            throw new NullPointerException("buffer");
-        }
+        ObjectUtil.checkNotNull(buffer, "buffer");
         if (length < 0) {
             if (releaseOnClose) {
                 buffer.release();
@@ -163,7 +162,8 @@ public class ByteBufInputStream extends InputStream implements DataInput {
 
     @Override
     public int read() throws IOException {
-        if (!buffer.isReadable()) {
+        int available = available();
+        if (available == 0) {
             return -1;
         }
         return buffer.readByte() & 0xff;
@@ -203,7 +203,8 @@ public class ByteBufInputStream extends InputStream implements DataInput {
 
     @Override
     public byte readByte() throws IOException {
-        if (!buffer.isReadable()) {
+        int available = available();
+        if (available == 0) {
             throw new EOFException();
         }
         return buffer.readByte();
@@ -245,22 +246,26 @@ public class ByteBufInputStream extends InputStream implements DataInput {
 
     @Override
     public String readLine() throws IOException {
-        if (!buffer.isReadable()) {
+        int available = available();
+        if (available == 0) {
             return null;
         }
+
         if (lineBuf != null) {
             lineBuf.setLength(0);
         }
 
         loop: do {
             int c = buffer.readUnsignedByte();
+            --available;
             switch (c) {
                 case '\n':
                     break loop;
 
                 case '\r':
-                    if (buffer.isReadable() && (char) buffer.getUnsignedByte(buffer.readerIndex()) == '\n') {
+                    if (available > 0 && (char) buffer.getUnsignedByte(buffer.readerIndex()) == '\n') {
                         buffer.skipBytes(1);
+                        --available;
                     }
                     break loop;
 
@@ -270,7 +275,7 @@ public class ByteBufInputStream extends InputStream implements DataInput {
                     }
                     lineBuf.append((char) c);
             }
-        } while (buffer.isReadable());
+        } while (available > 0);
 
         return lineBuf != null && lineBuf.length() > 0 ? lineBuf.toString() : StringUtil.EMPTY_STRING;
     }

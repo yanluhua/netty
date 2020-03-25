@@ -18,12 +18,14 @@ package io.netty.channel;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
-import io.netty.util.DefaultAttributeMap;
-import io.netty.util.Recycler;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ResourceLeakHint;
+import io.netty.util.concurrent.AbstractEventExecutor;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.OrderedEventExecutor;
+import io.netty.util.internal.ObjectPool;
+import io.netty.util.internal.ObjectPool.Handle;
+import io.netty.util.internal.ObjectPool.ObjectCreator;
 import io.netty.util.internal.PromiseNotificationUtil;
 import io.netty.util.internal.ThrowableUtil;
 import io.netty.util.internal.ObjectUtil;
@@ -35,8 +37,28 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 import java.net.SocketAddress;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
-abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
-        implements ChannelHandlerContext, ResourceLeakHint {
+import static io.netty.channel.ChannelHandlerMask.MASK_BIND;
+import static io.netty.channel.ChannelHandlerMask.MASK_CHANNEL_ACTIVE;
+import static io.netty.channel.ChannelHandlerMask.MASK_CHANNEL_INACTIVE;
+import static io.netty.channel.ChannelHandlerMask.MASK_CHANNEL_READ;
+import static io.netty.channel.ChannelHandlerMask.MASK_CHANNEL_READ_COMPLETE;
+import static io.netty.channel.ChannelHandlerMask.MASK_CHANNEL_REGISTERED;
+import static io.netty.channel.ChannelHandlerMask.MASK_CHANNEL_UNREGISTERED;
+import static io.netty.channel.ChannelHandlerMask.MASK_CHANNEL_WRITABILITY_CHANGED;
+import static io.netty.channel.ChannelHandlerMask.MASK_CLOSE;
+import static io.netty.channel.ChannelHandlerMask.MASK_CONNECT;
+import static io.netty.channel.ChannelHandlerMask.MASK_DEREGISTER;
+import static io.netty.channel.ChannelHandlerMask.MASK_DISCONNECT;
+import static io.netty.channel.ChannelHandlerMask.MASK_EXCEPTION_CAUGHT;
+import static io.netty.channel.ChannelHandlerMask.MASK_FLUSH;
+import static io.netty.channel.ChannelHandlerMask.MASK_ONLY_INBOUND;
+import static io.netty.channel.ChannelHandlerMask.MASK_ONLY_OUTBOUND;
+import static io.netty.channel.ChannelHandlerMask.MASK_READ;
+import static io.netty.channel.ChannelHandlerMask.MASK_USER_EVENT_TRIGGERED;
+import static io.netty.channel.ChannelHandlerMask.MASK_WRITE;
+import static io.netty.channel.ChannelHandlerMask.mask;
+
+abstract class AbstractChannelHandlerContext implements ChannelHandlerContext, ResourceLeakHint {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(AbstractChannelHandlerContext.class);
     volatile AbstractChannelHandlerContext next;
@@ -63,11 +85,10 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
      */
     private static final int INIT = 0;
 
-    private final boolean inbound;
-    private final boolean outbound;
     private final DefaultChannelPipeline pipeline;
     private final String name;
     private final boolean ordered;
+    private final int executionMask;
 
     // Will be set to null if no child executor should be used, otherwise it will be set to the
     // child executor.
@@ -80,13 +101,12 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     private volatile int handlerState = INIT;
 
-    AbstractChannelHandlerContext(DefaultChannelPipeline pipeline, EventExecutor executor, String name,
-                                  boolean inbound, boolean outbound) {
+    AbstractChannelHandlerContext(DefaultChannelPipeline pipeline, EventExecutor executor,
+                                  String name, Class<? extends ChannelHandler> handlerClass) {
         this.name = ObjectUtil.checkNotNull(name, "name");
         this.pipeline = pipeline;
         this.executor = executor;
-        this.inbound = inbound;
-        this.outbound = outbound;
+        this.executionMask = mask(handlerClass);
         // Its ordered if its driven by the EventLoop or the given Executor is an instanceof OrderedEventExecutor.
         ordered = executor == null || executor instanceof OrderedEventExecutor;
     }
@@ -122,7 +142,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext fireChannelRegistered() {
-        invokeChannelRegistered(findContextInbound());
+        invokeChannelRegistered(findContextInbound(MASK_CHANNEL_REGISTERED));
         return this;
     }
 
@@ -154,7 +174,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext fireChannelUnregistered() {
-        invokeChannelUnregistered(findContextInbound());
+        invokeChannelUnregistered(findContextInbound(MASK_CHANNEL_UNREGISTERED));
         return this;
     }
 
@@ -186,7 +206,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext fireChannelActive() {
-        invokeChannelActive(findContextInbound());
+        invokeChannelActive(findContextInbound(MASK_CHANNEL_ACTIVE));
         return this;
     }
 
@@ -218,7 +238,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext fireChannelInactive() {
-        invokeChannelInactive(findContextInbound());
+        invokeChannelInactive(findContextInbound(MASK_CHANNEL_INACTIVE));
         return this;
     }
 
@@ -250,7 +270,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext fireExceptionCaught(final Throwable cause) {
-        invokeExceptionCaught(next, cause);
+        invokeExceptionCaught(findContextInbound(MASK_EXCEPTION_CAUGHT), cause);
         return this;
     }
 
@@ -301,7 +321,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext fireUserEventTriggered(final Object event) {
-        invokeUserEventTriggered(findContextInbound(), event);
+        invokeUserEventTriggered(findContextInbound(MASK_USER_EVENT_TRIGGERED), event);
         return this;
     }
 
@@ -334,7 +354,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext fireChannelRead(final Object msg) {
-        invokeChannelRead(findContextInbound(), msg);
+        invokeChannelRead(findContextInbound(MASK_CHANNEL_READ), msg);
         return this;
     }
 
@@ -367,7 +387,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext fireChannelReadComplete() {
-        invokeChannelReadComplete(findContextInbound());
+        invokeChannelReadComplete(findContextInbound(MASK_CHANNEL_READ_COMPLETE));
         return this;
     }
 
@@ -398,7 +418,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext fireChannelWritabilityChanged() {
-        invokeChannelWritabilityChanged(findContextInbound());
+        invokeChannelWritabilityChanged(findContextInbound(MASK_CHANNEL_WRITABILITY_CHANGED));
         return this;
     }
 
@@ -459,15 +479,13 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelFuture bind(final SocketAddress localAddress, final ChannelPromise promise) {
-        if (localAddress == null) {
-            throw new NullPointerException("localAddress");
-        }
+        ObjectUtil.checkNotNull(localAddress, "localAddress");
         if (isNotValidPromise(promise, false)) {
             // cancelled
             return promise;
         }
 
-        final AbstractChannelHandlerContext next = findContextOutbound();
+        final AbstractChannelHandlerContext next = findContextOutbound(MASK_BIND);
         EventExecutor executor = next.executor();
         if (executor.inEventLoop()) {
             next.invokeBind(localAddress, promise);
@@ -477,7 +495,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
                 public void run() {
                     next.invokeBind(localAddress, promise);
                 }
-            }, promise, null);
+            }, promise, null, false);
         }
         return promise;
     }
@@ -502,16 +520,14 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
     @Override
     public ChannelFuture connect(
             final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
+        ObjectUtil.checkNotNull(remoteAddress, "remoteAddress");
 
-        if (remoteAddress == null) {
-            throw new NullPointerException("remoteAddress");
-        }
         if (isNotValidPromise(promise, false)) {
             // cancelled
             return promise;
         }
 
-        final AbstractChannelHandlerContext next = findContextOutbound();
+        final AbstractChannelHandlerContext next = findContextOutbound(MASK_CONNECT);
         EventExecutor executor = next.executor();
         if (executor.inEventLoop()) {
             next.invokeConnect(remoteAddress, localAddress, promise);
@@ -521,7 +537,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
                 public void run() {
                     next.invokeConnect(remoteAddress, localAddress, promise);
                 }
-            }, promise, null);
+            }, promise, null, false);
         }
         return promise;
     }
@@ -540,32 +556,27 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelFuture disconnect(final ChannelPromise promise) {
+        if (!channel().metadata().hasDisconnect()) {
+            // Translate disconnect to close if the channel has no notion of disconnect-reconnect.
+            // So far, UDP/IP is the only transport that has such behavior.
+            return close(promise);
+        }
         if (isNotValidPromise(promise, false)) {
             // cancelled
             return promise;
         }
 
-        final AbstractChannelHandlerContext next = findContextOutbound();
+        final AbstractChannelHandlerContext next = findContextOutbound(MASK_DISCONNECT);
         EventExecutor executor = next.executor();
         if (executor.inEventLoop()) {
-            // Translate disconnect to close if the channel has no notion of disconnect-reconnect.
-            // So far, UDP/IP is the only transport that has such behavior.
-            if (!channel().metadata().hasDisconnect()) {
-                next.invokeClose(promise);
-            } else {
-                next.invokeDisconnect(promise);
-            }
+            next.invokeDisconnect(promise);
         } else {
             safeExecute(executor, new Runnable() {
                 @Override
                 public void run() {
-                    if (!channel().metadata().hasDisconnect()) {
-                        next.invokeClose(promise);
-                    } else {
-                        next.invokeDisconnect(promise);
-                    }
+                    next.invokeDisconnect(promise);
                 }
-            }, promise, null);
+            }, promise, null, false);
         }
         return promise;
     }
@@ -589,7 +600,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
             return promise;
         }
 
-        final AbstractChannelHandlerContext next = findContextOutbound();
+        final AbstractChannelHandlerContext next = findContextOutbound(MASK_CLOSE);
         EventExecutor executor = next.executor();
         if (executor.inEventLoop()) {
             next.invokeClose(promise);
@@ -599,7 +610,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
                 public void run() {
                     next.invokeClose(promise);
                 }
-            }, promise, null);
+            }, promise, null, false);
         }
 
         return promise;
@@ -624,7 +635,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
             return promise;
         }
 
-        final AbstractChannelHandlerContext next = findContextOutbound();
+        final AbstractChannelHandlerContext next = findContextOutbound(MASK_DEREGISTER);
         EventExecutor executor = next.executor();
         if (executor.inEventLoop()) {
             next.invokeDeregister(promise);
@@ -634,7 +645,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
                 public void run() {
                     next.invokeDeregister(promise);
                 }
-            }, promise, null);
+            }, promise, null, false);
         }
 
         return promise;
@@ -654,7 +665,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext read() {
-        final AbstractChannelHandlerContext next = findContextOutbound();
+        final AbstractChannelHandlerContext next = findContextOutbound(MASK_READ);
         EventExecutor executor = next.executor();
         if (executor.inEventLoop()) {
             next.invokeRead();
@@ -693,7 +704,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
         return promise;
     }
 
-    private void invokeWrite(Object msg, ChannelPromise promise) {
+    void invokeWrite(Object msg, ChannelPromise promise) {
         if (invokeHandler()) {
             invokeWrite0(msg, promise);
         } else {
@@ -711,7 +722,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext flush() {
-        final AbstractChannelHandlerContext next = findContextOutbound();
+        final AbstractChannelHandlerContext next = findContextOutbound(MASK_FLUSH);
         EventExecutor executor = next.executor();
         if (executor.inEventLoop()) {
             next.invokeFlush();
@@ -720,7 +731,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
             if (tasks == null) {
                 next.invokeTasks = tasks = new Tasks(next);
             }
-            safeExecute(executor, tasks.invokeFlushTask, channel().voidPromise(), null);
+            safeExecute(executor, tasks.invokeFlushTask, channel().voidPromise(), null, false);
         }
 
         return this;
@@ -748,7 +759,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
         return promise;
     }
 
-    private void invokeWriteAndFlush(Object msg, ChannelPromise promise) {
+    void invokeWriteAndFlush(Object msg, ChannelPromise promise) {
         if (invokeHandler()) {
             invokeWrite0(msg, promise);
             invokeFlush0();
@@ -770,7 +781,8 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
             throw e;
         }
 
-        AbstractChannelHandlerContext next = findContextOutbound();
+        final AbstractChannelHandlerContext next = findContextOutbound(flush ?
+                (MASK_WRITE | MASK_FLUSH) : MASK_WRITE);
         final Object m = pipeline.touch(msg, next);
         EventExecutor executor = next.executor();
         if (executor.inEventLoop()) {
@@ -780,14 +792,9 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
                 next.invokeWrite(m, promise);
             }
         } else {
-            final AbstractWriteTask task;
-            if (flush) {
-                task = WriteAndFlushTask.newInstance(next, m, promise);
-            }  else {
-                task = WriteTask.newInstance(next, m, promise);
-            }
-            if (!safeExecute(executor, task, promise, m)) {
-                // We failed to submit the AbstractWriteTask. We need to cancel it so we decrement the pending bytes
+            final WriteTask task = WriteTask.newInstance(next, m, promise, flush);
+            if (!safeExecute(executor, task, promise, m, !flush)) {
+                // We failed to submit the WriteTask. We need to cancel it so we decrement the pending bytes
                 // and put it back in the Recycler for re-use later.
                 //
                 // See https://github.com/netty/netty/issues/8343.
@@ -865,9 +872,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
     }
 
     private boolean isNotValidPromise(ChannelPromise promise, boolean allowVoidPromise) {
-        if (promise == null) {
-            throw new NullPointerException("promise");
-        }
+        ObjectUtil.checkNotNull(promise, "promise");
 
         if (promise.isDone()) {
             // Check if the promise was cancelled and if so signal that the processing of the operation
@@ -901,20 +906,33 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
         return false;
     }
 
-    private AbstractChannelHandlerContext findContextInbound() {
+    private AbstractChannelHandlerContext findContextInbound(int mask) {
         AbstractChannelHandlerContext ctx = this;
+        EventExecutor currentExecutor = executor();
         do {
             ctx = ctx.next;
-        } while (!ctx.inbound);
+        } while (skipContext(ctx, currentExecutor, mask, MASK_ONLY_INBOUND));
         return ctx;
     }
 
-    private AbstractChannelHandlerContext findContextOutbound() {
+    private AbstractChannelHandlerContext findContextOutbound(int mask) {
         AbstractChannelHandlerContext ctx = this;
+        EventExecutor currentExecutor = executor();
         do {
             ctx = ctx.prev;
-        } while (!ctx.outbound);
+        } while (skipContext(ctx, currentExecutor, mask, MASK_ONLY_OUTBOUND));
         return ctx;
+    }
+
+    private static boolean skipContext(
+            AbstractChannelHandlerContext ctx, EventExecutor currentExecutor, int mask, int onlyMask) {
+        // Ensure we correctly handle MASK_EXCEPTION_CAUGHT which is not included in the MASK_EXCEPTION_CAUGHT
+        return (ctx.executionMask & (onlyMask | mask)) == 0 ||
+                // We can only skip if the EventExecutor is the same as otherwise we need to ensure we offload
+                // everything to preserve ordering.
+                //
+                // See https://github.com/netty/netty/issues/10067
+                (ctx.executor() == currentExecutor && (ctx.executionMask & mask) == 0);
     }
 
     @Override
@@ -995,9 +1013,14 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
         return channel().hasAttr(key);
     }
 
-    private static boolean safeExecute(EventExecutor executor, Runnable runnable, ChannelPromise promise, Object msg) {
+    private static boolean safeExecute(EventExecutor executor, Runnable runnable,
+            ChannelPromise promise, Object msg, boolean lazy) {
         try {
-            executor.execute(runnable);
+            if (lazy && executor instanceof AbstractEventExecutor) {
+                ((AbstractEventExecutor) executor).lazyExecute(runnable);
+            } else {
+                executor.execute(runnable);
+            }
             return true;
         } catch (Throwable cause) {
             try {
@@ -1021,28 +1044,41 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
         return StringUtil.simpleClassName(ChannelHandlerContext.class) + '(' + name + ", " + channel() + ')';
     }
 
-    abstract static class AbstractWriteTask implements Runnable {
+    static final class WriteTask implements Runnable {
+        private static final ObjectPool<WriteTask> RECYCLER = ObjectPool.newPool(new ObjectCreator<WriteTask>() {
+            @Override
+            public WriteTask newObject(Handle<WriteTask> handle) {
+                return new WriteTask(handle);
+            }
+        });
+
+        static WriteTask newInstance(AbstractChannelHandlerContext ctx,
+                Object msg, ChannelPromise promise, boolean flush) {
+            WriteTask task = RECYCLER.get();
+            init(task, ctx, msg, promise, flush);
+            return task;
+        }
 
         private static final boolean ESTIMATE_TASK_SIZE_ON_SUBMIT =
                 SystemPropertyUtil.getBoolean("io.netty.transport.estimateSizeOnSubmit", true);
 
-        // Assuming a 64-bit JVM, 16 bytes object header, 3 reference fields and one int field, plus alignment
+        // Assuming compressed oops, 12 bytes obj header, 4 ref fields and one int field
         private static final int WRITE_TASK_OVERHEAD =
-                SystemPropertyUtil.getInt("io.netty.transport.writeTaskSizeOverhead", 48);
+                SystemPropertyUtil.getInt("io.netty.transport.writeTaskSizeOverhead", 32);
 
-        private final Recycler.Handle<AbstractWriteTask> handle;
+        private final Handle<WriteTask> handle;
         private AbstractChannelHandlerContext ctx;
         private Object msg;
         private ChannelPromise promise;
-        private int size;
+        private int size; // sign bit controls flush
 
         @SuppressWarnings("unchecked")
-        private AbstractWriteTask(Recycler.Handle<? extends AbstractWriteTask> handle) {
-            this.handle = (Recycler.Handle<AbstractWriteTask>) handle;
+        private WriteTask(Handle<? extends WriteTask> handle) {
+            this.handle = (Handle<WriteTask>) handle;
         }
 
-        protected static void init(AbstractWriteTask task, AbstractChannelHandlerContext ctx,
-                                   Object msg, ChannelPromise promise) {
+        protected static void init(WriteTask task, AbstractChannelHandlerContext ctx,
+                                   Object msg, ChannelPromise promise, boolean flush) {
             task.ctx = ctx;
             task.msg = msg;
             task.promise = promise;
@@ -1053,13 +1089,20 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
             } else {
                 task.size = 0;
             }
+            if (flush) {
+                task.size |= Integer.MIN_VALUE;
+            }
         }
 
         @Override
-        public final void run() {
+        public void run() {
             try {
                 decrementPendingOutboundBytes();
-                write(ctx, msg, promise);
+                if (size >= 0) {
+                    ctx.invokeWrite(msg, promise);
+                } else {
+                    ctx.invokeWriteAndFlush(msg, promise);
+                }
             } finally {
                 recycle();
             }
@@ -1075,7 +1118,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
         private void decrementPendingOutboundBytes() {
             if (ESTIMATE_TASK_SIZE_ON_SUBMIT) {
-                ctx.pipeline.decrementPendingOutboundBytes(size);
+                ctx.pipeline.decrementPendingOutboundBytes(size & Integer.MAX_VALUE);
             }
         }
 
@@ -1085,58 +1128,6 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
             msg = null;
             promise = null;
             handle.recycle(this);
-        }
-
-        protected void write(AbstractChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
-            ctx.invokeWrite(msg, promise);
-        }
-    }
-
-    static final class WriteTask extends AbstractWriteTask implements SingleThreadEventLoop.NonWakeupRunnable {
-
-        private static final Recycler<WriteTask> RECYCLER = new Recycler<WriteTask>() {
-            @Override
-            protected WriteTask newObject(Handle<WriteTask> handle) {
-                return new WriteTask(handle);
-            }
-        };
-
-        static WriteTask newInstance(
-                AbstractChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
-            WriteTask task = RECYCLER.get();
-            init(task, ctx, msg, promise);
-            return task;
-        }
-
-        private WriteTask(Recycler.Handle<WriteTask> handle) {
-            super(handle);
-        }
-    }
-
-    static final class WriteAndFlushTask extends AbstractWriteTask {
-
-        private static final Recycler<WriteAndFlushTask> RECYCLER = new Recycler<WriteAndFlushTask>() {
-            @Override
-            protected WriteAndFlushTask newObject(Handle<WriteAndFlushTask> handle) {
-                return new WriteAndFlushTask(handle);
-            }
-        };
-
-        static WriteAndFlushTask newInstance(
-                AbstractChannelHandlerContext ctx, Object msg,  ChannelPromise promise) {
-            WriteAndFlushTask task = RECYCLER.get();
-            init(task, ctx, msg, promise);
-            return task;
-        }
-
-        private WriteAndFlushTask(Recycler.Handle<WriteAndFlushTask> handle) {
-            super(handle);
-        }
-
-        @Override
-        public void write(AbstractChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
-            super.write(ctx, msg, promise);
-            ctx.invokeFlush();
         }
     }
 

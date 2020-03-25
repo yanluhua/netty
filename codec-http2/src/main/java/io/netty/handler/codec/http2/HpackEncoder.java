@@ -41,6 +41,7 @@ import java.util.Arrays;
 import java.util.Map;
 
 import static io.netty.handler.codec.http2.HpackUtil.equalsConstantTime;
+import static io.netty.handler.codec.http2.HpackUtil.equalsVariableTime;
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_HEADER_TABLE_SIZE;
 import static io.netty.handler.codec.http2.Http2CodecUtil.MAX_HEADER_LIST_SIZE;
 import static io.netty.handler.codec.http2.Http2CodecUtil.MAX_HEADER_TABLE_SIZE;
@@ -53,7 +54,15 @@ import static io.netty.util.internal.MathUtil.findNextPositivePowerOfTwo;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 
+/**
+ * An HPACK encoder.
+ *
+ * <p>Implementation note:  This class is security sensitive, and depends on users correctly identifying their headers
+ * as security sensitive or not.  If a header is considered not sensitive, methods names "insensitive" are used which
+ * are fast, but don't provide any security guarantees.
+ */
 final class HpackEncoder {
+    static final int HUFF_CODE_THRESHOLD = 512;
     // a linked hash map of header fields
     private final HeaderEntry[] headerFields;
     private final HeaderEntry head = new HeaderEntry(-1, AsciiString.EMPTY_STRING,
@@ -61,6 +70,7 @@ final class HpackEncoder {
     private final HpackHuffmanEncoder hpackHuffmanEncoder = new HpackHuffmanEncoder();
     private final byte hashMask;
     private final boolean ignoreMaxHeaderListSize;
+    private final int huffCodeThreshold;
     private long size;
     private long maxHeaderTableSize;
     private long maxHeaderListSize;
@@ -76,13 +86,13 @@ final class HpackEncoder {
      * Creates a new encoder.
      */
     HpackEncoder(boolean ignoreMaxHeaderListSize) {
-        this(ignoreMaxHeaderListSize, 16);
+        this(ignoreMaxHeaderListSize, 16, HUFF_CODE_THRESHOLD);
     }
 
     /**
      * Creates a new encoder.
      */
-    HpackEncoder(boolean ignoreMaxHeaderListSize, int arraySizeHint) {
+    HpackEncoder(boolean ignoreMaxHeaderListSize, int arraySizeHint, int huffCodeThreshold) {
         this.ignoreMaxHeaderListSize = ignoreMaxHeaderListSize;
         maxHeaderTableSize = DEFAULT_HEADER_TABLE_SIZE;
         maxHeaderListSize = MAX_HEADER_LIST_SIZE;
@@ -91,6 +101,7 @@ final class HpackEncoder {
         headerFields = new HeaderEntry[findNextPositivePowerOfTwo(max(2, min(arraySizeHint, 128)))];
         hashMask = (byte) (headerFields.length - 1);
         head.before = head.after = head;
+        this.huffCodeThreshold = huffCodeThreshold;
     }
 
     /**
@@ -150,7 +161,7 @@ final class HpackEncoder {
 
         // If the peer will only use the static table
         if (maxHeaderTableSize == 0) {
-            int staticTableIndex = HpackStaticTable.getIndex(name, value);
+            int staticTableIndex = HpackStaticTable.getIndexInsensitive(name, value);
             if (staticTableIndex == -1) {
                 int nameIndex = HpackStaticTable.getIndex(name);
                 encodeLiteral(out, name, value, IndexType.NONE, nameIndex);
@@ -167,13 +178,13 @@ final class HpackEncoder {
             return;
         }
 
-        HeaderEntry headerField = getEntry(name, value);
+        HeaderEntry headerField = getEntryInsensitive(name, value);
         if (headerField != null) {
             int index = getIndex(headerField.index) + HpackStaticTable.length;
             // Section 6.1. Indexed Header Field Representation
             encodeInteger(out, 0x80, 7, index);
         } else {
-            int staticTableIndex = HpackStaticTable.getIndex(name, value);
+            int staticTableIndex = HpackStaticTable.getIndexInsensitive(name, value);
             if (staticTableIndex != -1) {
                 // Section 6.1. Indexed Header Field Representation
                 encodeInteger(out, 0x80, 7, staticTableIndex);
@@ -250,8 +261,9 @@ final class HpackEncoder {
      * Encode string literal according to Section 5.2.
      */
     private void encodeStringLiteral(ByteBuf out, CharSequence string) {
-        int huffmanLength = hpackHuffmanEncoder.getEncodedLength(string);
-        if (huffmanLength < string.length()) {
+        int huffmanLength;
+        if (string.length() >= huffCodeThreshold
+                && (huffmanLength = hpackHuffmanEncoder.getEncodedLength(string)) < string.length()) {
             encodeInteger(out, 0x80, 7, huffmanLength);
             hpackHuffmanEncoder.encode(out, string);
         } else {
@@ -347,15 +359,16 @@ final class HpackEncoder {
      * Returns the header entry with the lowest index value for the header field. Returns null if
      * header field is not in the dynamic table.
      */
-    private HeaderEntry getEntry(CharSequence name, CharSequence value) {
+    private HeaderEntry getEntryInsensitive(CharSequence name, CharSequence value) {
         if (length() == 0 || name == null || value == null) {
             return null;
         }
         int h = AsciiString.hashCode(name);
         int i = index(h);
         for (HeaderEntry e = headerFields[i]; e != null; e = e.next) {
-            // To avoid short circuit behavior a bitwise operator is used instead of a boolean operator.
-            if (e.hash == h && (equalsConstantTime(name, e.name) & equalsConstantTime(value, e.value)) != 0) {
+            // Check the value before then name, as it is more likely the value will be different incase there is no
+            // match.
+            if (e.hash == h && equalsVariableTime(value, e.value) && equalsVariableTime(name, e.name)) {
                 return e;
             }
         }

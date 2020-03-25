@@ -20,9 +20,10 @@ package io.netty.buffer;
 import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 
 import io.netty.buffer.PoolArena.SizeClass;
-import io.netty.util.Recycler;
-import io.netty.util.Recycler.Handle;
 import io.netty.util.internal.MathUtil;
+import io.netty.util.internal.ObjectPool;
+import io.netty.util.internal.ObjectPool.Handle;
+import io.netty.util.internal.ObjectPool.ObjectCreator;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
@@ -41,6 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class PoolThreadCache {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(PoolThreadCache.class);
+    private static final int INTEGER_SIZE_MINUS_ONE = Integer.SIZE - 1;
 
     final PoolArena<byte[]> heapArena;
     final PoolArena<ByteBuffer> directArena;
@@ -150,13 +152,9 @@ final class PoolThreadCache {
         }
     }
 
+    // val > 0
     private static int log2(int val) {
-        int res = 0;
-        while (val > 1) {
-            val >>= 1;
-            res++;
-        }
-        return res;
+        return INTEGER_SIZE_MINUS_ONE - Integer.numberOfLeadingZeros(val);
     }
 
     /**
@@ -227,23 +225,23 @@ final class PoolThreadCache {
         try {
             super.finalize();
         } finally {
-            free();
+            free(true);
         }
     }
 
     /**
      *  Should be called if the Thread that uses this cache is about to exist to release resources out of the cache
      */
-    void free() {
+    void free(boolean finalizer) {
         // As free() may be called either by the finalizer or by FastThreadLocal.onRemoval(...) we need to ensure
         // we only call this one time.
         if (freed.compareAndSet(false, true)) {
-            int numFreed = free(tinySubPageDirectCaches) +
-                    free(smallSubPageDirectCaches) +
-                    free(normalDirectCaches) +
-                    free(tinySubPageHeapCaches) +
-                    free(smallSubPageHeapCaches) +
-                    free(normalHeapCaches);
+            int numFreed = free(tinySubPageDirectCaches, finalizer) +
+                    free(smallSubPageDirectCaches, finalizer) +
+                    free(normalDirectCaches, finalizer) +
+                    free(tinySubPageHeapCaches, finalizer) +
+                    free(smallSubPageHeapCaches, finalizer) +
+                    free(normalHeapCaches, finalizer);
 
             if (numFreed > 0 && logger.isDebugEnabled()) {
                 logger.debug("Freed {} thread-local buffer(s) from thread: {}", numFreed,
@@ -260,23 +258,23 @@ final class PoolThreadCache {
         }
     }
 
-    private static int free(MemoryRegionCache<?>[] caches) {
+    private static int free(MemoryRegionCache<?>[] caches, boolean finalizer) {
         if (caches == null) {
             return 0;
         }
 
         int numFreed = 0;
         for (MemoryRegionCache<?> c: caches) {
-            numFreed += free(c);
+            numFreed += free(c, finalizer);
         }
         return numFreed;
     }
 
-    private static int free(MemoryRegionCache<?> cache) {
+    private static int free(MemoryRegionCache<?> cache, boolean finalizer) {
         if (cache == null) {
             return 0;
         }
-        return cache.free();
+        return cache.free(finalizer);
     }
 
     void trim() {
@@ -322,6 +320,7 @@ final class PoolThreadCache {
 
     private MemoryRegionCache<?> cacheForNormal(PoolArena<?> area, int normCapacity) {
         if (area.isDirect()) {
+            // sizeClass == Normal => normCapacity >= pageSize => the shifted value > 0
             int idx = log2(normCapacity >> numShiftsNormalDirect);
             return cache(normalDirectCaches, idx);
         }
@@ -418,16 +417,16 @@ final class PoolThreadCache {
         /**
          * Clear out this cache and free up all previous cached {@link PoolChunk}s and {@code handle}s.
          */
-        public final int free() {
-            return free(Integer.MAX_VALUE);
+        public final int free(boolean finalizer) {
+            return free(Integer.MAX_VALUE, finalizer);
         }
 
-        private int free(int max) {
+        private int free(int max, boolean finalizer) {
             int numFreed = 0;
             for (; numFreed < max; numFreed++) {
                 Entry<T> entry = queue.poll();
                 if (entry != null) {
-                    freeEntry(entry);
+                    freeEntry(entry, finalizer);
                 } else {
                     // all cleared
                     return numFreed;
@@ -445,20 +444,23 @@ final class PoolThreadCache {
 
             // We not even allocated all the number that are
             if (free > 0) {
-                free(free);
+                free(free, false);
             }
         }
 
         @SuppressWarnings({ "unchecked", "rawtypes" })
-        private  void freeEntry(Entry entry) {
+        private  void freeEntry(Entry entry, boolean finalizer) {
             PoolChunk chunk = entry.chunk;
             long handle = entry.handle;
             ByteBuffer nioBuffer = entry.nioBuffer;
 
-            // recycle now so PoolChunk can be GC'ed.
-            entry.recycle();
+            if (!finalizer) {
+                // recycle now so PoolChunk can be GC'ed. This will only be done if this is not freed because of
+                // a finalizer.
+                entry.recycle();
+            }
 
-            chunk.arena.freeChunk(chunk, handle, sizeClass, nioBuffer);
+            chunk.arena.freeChunk(chunk, handle, sizeClass, nioBuffer, finalizer);
         }
 
         static final class Entry<T> {
@@ -489,12 +491,12 @@ final class PoolThreadCache {
         }
 
         @SuppressWarnings("rawtypes")
-        private static final Recycler<Entry> RECYCLER = new Recycler<Entry>() {
+        private static final ObjectPool<Entry> RECYCLER = ObjectPool.newPool(new ObjectCreator<Entry>() {
             @SuppressWarnings("unchecked")
             @Override
-            protected Entry newObject(Handle<Entry> handle) {
+            public Entry newObject(Handle<Entry> handle) {
                 return new Entry(handle);
             }
-        };
+        });
     }
 }

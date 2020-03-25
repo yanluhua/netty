@@ -20,9 +20,10 @@ import io.netty.channel.EventLoop;
 import io.netty.channel.ReflectiveChannelFactory;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.InternetProtocolFamily;
+import io.netty.channel.socket.SocketChannel;
 import io.netty.resolver.HostsFileEntriesResolver;
 import io.netty.resolver.ResolvedAddressTypes;
-import io.netty.util.internal.UnstableApi;
+import io.netty.util.concurrent.Future;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -35,10 +36,10 @@ import static io.netty.util.internal.ObjectUtil.intValue;
 /**
  * A {@link DnsNameResolver} builder.
  */
-@UnstableApi
 public final class DnsNameResolverBuilder {
     private EventLoop eventLoop;
     private ChannelFactory<? extends DatagramChannel> channelFactory;
+    private ChannelFactory<? extends SocketChannel> socketChannelFactory;
     private DnsCache resolveCache;
     private DnsCnameCache cnameCache;
     private AuthoritativeDnsServerCache authoritativeDnsServerCache;
@@ -47,6 +48,7 @@ public final class DnsNameResolverBuilder {
     private Integer negativeTtl;
     private long queryTimeoutMillis = 5000;
     private ResolvedAddressTypes resolvedAddressTypes = DnsNameResolver.DEFAULT_RESOLVE_ADDRESS_TYPES;
+    private boolean completeOncePreferredResolved;
     private boolean recursionDesired = true;
     private int maxQueriesPerResolve = 16;
     private boolean traceEnabled;
@@ -111,6 +113,35 @@ public final class DnsNameResolverBuilder {
      */
     public DnsNameResolverBuilder channelType(Class<? extends DatagramChannel> channelType) {
         return channelFactory(new ReflectiveChannelFactory<DatagramChannel>(channelType));
+    }
+
+    /**
+     * Sets the {@link ChannelFactory} that will create a {@link SocketChannel} for
+     * <a href="https://tools.ietf.org/html/rfc7766">TCP fallback</a> if needed.
+     *
+     * @param channelFactory the {@link ChannelFactory} or {@code null}
+     *                       if <a href="https://tools.ietf.org/html/rfc7766">TCP fallback</a> should not be supported.
+     * @return {@code this}
+     */
+    public DnsNameResolverBuilder socketChannelFactory(ChannelFactory<? extends SocketChannel> channelFactory) {
+        this.socketChannelFactory = channelFactory;
+        return this;
+    }
+
+    /**
+     * Sets the {@link ChannelFactory} as a {@link ReflectiveChannelFactory} of this type for
+     * <a href="https://tools.ietf.org/html/rfc7766">TCP fallback</a> if needed.
+     * Use as an alternative to {@link #socketChannelFactory(ChannelFactory)}.
+     *
+     * @param channelType the type or {@code null} if <a href="https://tools.ietf.org/html/rfc7766">TCP fallback</a>
+     *                    should not be supported.
+     * @return {@code this}
+     */
+    public DnsNameResolverBuilder socketChannelType(Class<? extends SocketChannel> channelType) {
+        if (channelType == null) {
+            return socketChannelFactory(null);
+        }
+        return socketChannelFactory(new ReflectiveChannelFactory<SocketChannel>(channelType));
     }
 
     /**
@@ -250,6 +281,18 @@ public final class DnsNameResolverBuilder {
      */
     public DnsNameResolverBuilder resolvedAddressTypes(ResolvedAddressTypes resolvedAddressTypes) {
         this.resolvedAddressTypes = resolvedAddressTypes;
+        return this;
+    }
+
+    /**
+     * If {@code true} {@link DnsNameResolver#resolveAll(String)} will notify the returned {@link Future} as
+     * soon as all queries for the preferred address-type are complete.
+     *
+     * @param completeOncePreferredResolved {@code true} to enable, {@code false} to disable.
+     * @return {@code this}
+     */
+    public DnsNameResolverBuilder completeOncePreferredResolved(boolean completeOncePreferredResolved) {
+        this.completeOncePreferredResolved = completeOncePreferredResolved;
         return this;
     }
 
@@ -430,6 +473,7 @@ public final class DnsNameResolverBuilder {
         return new DnsNameResolver(
                 eventLoop,
                 channelFactory,
+                socketChannelFactory,
                 resolveCache,
                 cnameCache,
                 authoritativeDnsServerCache,
@@ -445,7 +489,8 @@ public final class DnsNameResolverBuilder {
                 dnsServerAddressStreamProvider,
                 searchDomains,
                 ndots,
-                decodeIdn);
+                decodeIdn,
+                completeOncePreferredResolved);
     }
 
     /**
@@ -462,6 +507,10 @@ public final class DnsNameResolverBuilder {
 
         if (channelFactory != null) {
             copiedBuilder.channelFactory(channelFactory);
+        }
+
+        if (socketChannelFactory != null) {
+            copiedBuilder.socketChannelFactory(socketChannelFactory);
         }
 
         if (resolveCache != null) {
@@ -506,6 +555,7 @@ public final class DnsNameResolverBuilder {
 
         copiedBuilder.ndots(ndots);
         copiedBuilder.decodeIdn(decodeIdn);
+        copiedBuilder.completeOncePreferredResolved(completeOncePreferredResolved);
 
         return copiedBuilder;
     }

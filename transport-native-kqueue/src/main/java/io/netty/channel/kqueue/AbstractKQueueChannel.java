@@ -132,6 +132,11 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
         doClose();
     }
 
+    void resetCachedAddresses() {
+        local = socket.localAddress();
+        remote = socket.remoteAddress();
+    }
+
     @Override
     protected boolean isCompatible(EventLoop loop) {
         return loop instanceof KQueueEventLoop;
@@ -144,12 +149,19 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
 
     @Override
     protected void doDeregister() throws Exception {
+        ((KQueueEventLoop) eventLoop()).remove(this);
+
+        // As unregisteredFilters() may have not been called because isOpen() returned false we just set both filters
+        // to false to ensure a consistent state in all cases.
+        readFilterEnabled = false;
+        writeFilterEnabled = false;
+    }
+
+    void unregisterFilters() throws Exception {
         // Make sure we unregister our filters from kqueue!
         readFilter(false);
         writeFilter(false);
         evSet0(Native.EVFILT_SOCK, Native.EV_DELETE, 0);
-
-        ((KQueueEventLoop) eventLoop()).remove(this);
     }
 
     @Override
@@ -269,7 +281,7 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
                 return 1;
             }
         } else {
-            final ByteBuffer nioBuf = buf.nioBufferCount() == 1 ?
+            final ByteBuffer nioBuf = buf.nioBufferCount() == 1?
                     buf.internalNioBuffer(buf.readerIndex(), buf.readableBytes()) : buf.nioBuffer();
             int localFlushedAmount = socket.write(nioBuf, nioBuf.position(), nioBuf.limit());
             if (localFlushedAmount > 0) {
@@ -286,6 +298,10 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
     }
 
     private static boolean isAllowHalfClosure(ChannelConfig config) {
+        if (config instanceof KQueueDomainSocketChannelConfig) {
+            return ((KQueueDomainSocketChannelConfig) config).isAllowHalfClosure();
+        }
+
         return config instanceof SocketChannelConfig &&
                 ((SocketChannelConfig) config).isAllowHalfClosure();
     }
@@ -331,7 +347,7 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
     }
 
     private void evSet(short filter, short flags) {
-        if (isOpen() && isRegistered()) {
+        if (isRegistered()) {
             evSet0(filter, flags);
         }
     }
@@ -341,7 +357,10 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
     }
 
     private void evSet0(short filter, short flags, int fflags) {
-        ((KQueueEventLoop) eventLoop()).evSet(this, filter, flags, fflags);
+        // Only try to add to changeList if the FD is still open, if not we already closed it in the meantime.
+        if (isOpen()) {
+            ((KQueueEventLoop) eventLoop()).evSet(this, filter, flags, fflags);
+        }
     }
 
     abstract class AbstractKQueueUnsafe extends AbstractUnsafe {
@@ -682,7 +701,7 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
 
         boolean connected = doConnect0(remoteAddress);
         if (connected) {
-            remote = remoteSocketAddr == null ?
+            remote = remoteSocketAddr == null?
                     remoteAddress : computeRemoteAddr(remoteSocketAddr, socket.remoteAddress());
         }
         // We always need to set the localAddress even if not connected yet as the bind already took place.

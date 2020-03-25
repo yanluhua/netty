@@ -137,9 +137,11 @@ public final class NativeLibraryLoader {
             return;
         } catch (Throwable ex) {
             suppressed.add(ex);
-            logger.debug(
-                    "{} cannot be loaded from java.libary.path, "
-                    + "now trying export to -Dio.netty.native.workdir: {}", name, WORKDIR, ex);
+            if (logger.isDebugEnabled()) {
+                logger.debug(
+                        "{} cannot be loaded from java.library.path, "
+                                + "now trying export to -Dio.netty.native.workdir: {}", name, WORKDIR, ex);
+            }
         }
 
         String libname = System.mapLibraryName(name);
@@ -178,7 +180,7 @@ public final class NativeLibraryLoader {
 
             int index = libname.lastIndexOf('.');
             String prefix = libname.substring(0, index);
-            String suffix = libname.substring(index, libname.length());
+            String suffix = libname.substring(index);
 
             tmpFile = File.createTempFile(prefix, suffix, WORKDIR);
             in = url.openStream();
@@ -482,6 +484,7 @@ public final class NativeLibraryLoader {
 
     private static final class NoexecVolumeDetector {
 
+        @SuppressJava6Requirement(reason = "Usage guarded by java version check")
         private static boolean canExecuteExecutable(File file) throws IOException {
             if (PlatformDependent.javaVersion() < 7) {
                 // Pre-JDK7, the Java API did not directly support POSIX permissions; instead of implementing a custom
