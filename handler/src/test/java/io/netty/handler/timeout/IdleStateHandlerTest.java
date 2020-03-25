@@ -25,7 +25,6 @@ import static org.junit.Assert.assertTrue;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.ReferenceCountUtil;
@@ -72,7 +71,7 @@ public class IdleStateHandlerTest {
         assertTrue("The number of expected events must be >= 1", expected.length >= 1);
 
         final List<Object> events = new ArrayList<>();
-        ChannelInboundHandlerAdapter handler = new ChannelInboundHandlerAdapter() {
+        ChannelHandler handler = new ChannelHandler() {
             @Override
             public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
                 events.add(evt);
@@ -143,7 +142,7 @@ public class IdleStateHandlerTest {
                                    Action action, Object expected) throws Exception {
 
         final List<Object> events = new ArrayList<>();
-        ChannelInboundHandlerAdapter handler = new ChannelInboundHandlerAdapter() {
+        ChannelHandler handler = new ChannelHandler() {
             @Override
             public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
                 events.add(evt);
@@ -203,7 +202,7 @@ public class IdleStateHandlerTest {
                 true, 0L, writerIdleTime, allIdleTime, TimeUnit.SECONDS);
 
         final List<Object> events = new ArrayList<>();
-        ChannelInboundHandlerAdapter handler = new ChannelInboundHandlerAdapter() {
+        ChannelHandler handler = new ChannelHandler() {
             @Override
             public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
                 events.add(evt);
@@ -216,6 +215,7 @@ public class IdleStateHandlerTest {
             channel.writeAndFlush(Unpooled.wrappedBuffer(new byte[] { 1 }));
             channel.writeAndFlush(Unpooled.wrappedBuffer(new byte[] { 2 }));
             channel.writeAndFlush(Unpooled.wrappedBuffer(new byte[] { 3 }));
+            channel.writeAndFlush(Unpooled.wrappedBuffer(new byte[5 * 1024]));
 
             // Establish a baseline. We're not consuming anything and let it idle once.
             idleStateHandler.tickRun();
@@ -263,6 +263,30 @@ public class IdleStateHandlerTest {
             assertEquals(0, events.size());
             assertEquals(26L, idleStateHandler.tick(TimeUnit.SECONDS)); // 23s + 2s + 1s
 
+            // Consume part of the message every 2 seconds, then be idle for 1 seconds,
+            // then run the task and we should get an IdleStateEvent because the first trigger
+            idleStateHandler.tick(2L, TimeUnit.SECONDS);
+            assertNotNullAndRelease(channel.consumePart(1024));
+            idleStateHandler.tick(2L, TimeUnit.SECONDS);
+            assertNotNullAndRelease(channel.consumePart(1024));
+            idleStateHandler.tickRun(1L, TimeUnit.SECONDS);
+            assertEquals(1, events.size());
+            assertEquals(31L, idleStateHandler.tick(TimeUnit.SECONDS)); // 26s + 2s + 2s + 1s
+            events.clear();
+
+            // Consume part of the message every 2 seconds, then be idle for 1 seconds,
+            // then consume all the rest of the message, then run the task and we shouldn't
+            // get an IdleStateEvent because the data is flowing and we haven't been idle for long enough!
+            idleStateHandler.tick(2L, TimeUnit.SECONDS);
+            assertNotNullAndRelease(channel.consumePart(1024));
+            idleStateHandler.tick(2L, TimeUnit.SECONDS);
+            assertNotNullAndRelease(channel.consumePart(1024));
+            idleStateHandler.tickRun(1L, TimeUnit.SECONDS);
+            assertEquals(0, events.size());
+            assertEquals(36L, idleStateHandler.tick(TimeUnit.SECONDS)); // 31s + 2s + 2s + 1s
+            idleStateHandler.tick(2L, TimeUnit.SECONDS);
+            assertNotNullAndRelease(channel.consumePart(1024));
+
             // There are no messages left! Advance the ticker by 3 seconds,
             // attempt a consume() but it will be null, then advance the
             // ticker by an another 2 seconds and we should get an IdleStateEvent
@@ -272,7 +296,7 @@ public class IdleStateHandlerTest {
 
             idleStateHandler.tickRun(2L, TimeUnit.SECONDS);
             assertEquals(1, events.size());
-            assertEquals(31L, idleStateHandler.tick(TimeUnit.SECONDS)); // 26s + 3s + 2s
+            assertEquals(43L, idleStateHandler.tick(TimeUnit.SECONDS)); // 36s + 2s + 3s + 2s
 
             // q.e.d.
         } finally {
@@ -359,13 +383,32 @@ public class IdleStateHandlerTest {
             // the messages in the ChannelOutboundBuffer.
         }
 
-        public Object consume() {
+        private Object consume() {
             ChannelOutboundBuffer buf = unsafe().outboundBuffer();
             if (buf != null) {
                 Object msg = buf.current();
                 if (msg != null) {
                     ReferenceCountUtil.retain(msg);
                     buf.remove();
+                    return msg;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Consume the part of a message.
+         *
+         * @param byteCount count of byte to be consumed
+         * @return the message currently being consumed
+         */
+        private Object consumePart(int byteCount) {
+            ChannelOutboundBuffer buf = unsafe().outboundBuffer();
+            if (buf != null) {
+                Object msg = buf.current();
+                if (msg != null) {
+                    ReferenceCountUtil.retain(msg);
+                    buf.removeBytes(byteCount);
                     return msg;
                 }
             }

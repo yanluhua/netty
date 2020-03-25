@@ -19,11 +19,11 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufHolder;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.util.Recycler;
-import io.netty.util.Recycler.Handle;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.FastThreadLocal;
 import io.netty.util.internal.InternalThreadLocalMap;
+import io.netty.util.internal.ObjectPool;
+import io.netty.util.internal.ObjectPool.Handle;
 import io.netty.util.internal.PromiseNotificationUtil;
 import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.logging.InternalLogger;
@@ -53,7 +53,7 @@ import static java.util.Objects.requireNonNull;
 public final class ChannelOutboundBuffer {
     // Assuming a 64-bit JVM:
     //  - 16 bytes object header
-    //  - 8 reference fields
+    //  - 6 reference fields
     //  - 2 long fields
     //  - 2 int fields
     //  - 1 boolean field
@@ -222,15 +222,27 @@ public final class ChannelOutboundBuffer {
     }
 
     /**
+     * Return the current message flush progress.
+     * @return {@code 0} if nothing was flushed before for the current message or there is no current message
+     */
+    public long currentProgress() {
+        Entry entry = flushedEntry;
+        if (entry == null) {
+            return 0;
+        }
+        return entry.progress;
+    }
+
+    /**
      * Notify the {@link ChannelPromise} of the current message about writing progress.
      */
     public void progress(long amount) {
         Entry e = flushedEntry;
         assert e != null;
         ChannelPromise p = e.promise;
+        long progress = e.progress + amount;
+        e.progress = progress;
         if (p instanceof ChannelProgressivePromise) {
-            long progress = e.progress + amount;
-            e.progress = progress;
             ((ChannelProgressivePromise) p).tryProgress(progress, e.total);
         }
     }
@@ -775,12 +787,7 @@ public final class ChannelOutboundBuffer {
     }
 
     static final class Entry {
-        private static final Recycler<Entry> RECYCLER = new Recycler<Entry>() {
-            @Override
-            protected Entry newObject(Handle<Entry> handle) {
-                return new Entry(handle);
-            }
-        };
+        private static final ObjectPool<Entry> RECYCLER = ObjectPool.newPool(Entry::new);
 
         private final Handle<Entry> handle;
         Entry next;

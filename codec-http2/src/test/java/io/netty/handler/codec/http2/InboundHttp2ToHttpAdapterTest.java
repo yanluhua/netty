@@ -20,8 +20,8 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
@@ -665,7 +665,7 @@ public class InboundHttp2ToHttpAdapterTest {
 
                 clientDelegator = new HttpResponseDelegator(clientListener, clientLatch, clientLatch2);
                 p.addLast(clientDelegator);
-                p.addLast(new ChannelInboundHandlerAdapter() {
+                p.addLast(new ChannelHandler() {
                     @Override
                     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
                         Http2Exception e = getEmbeddedHttp2Exception(cause);
@@ -673,11 +673,11 @@ public class InboundHttp2ToHttpAdapterTest {
                             clientException = e;
                             clientLatch.countDown();
                         } else {
-                            super.exceptionCaught(ctx, cause);
+                            ctx.fireExceptionCaught(cause);
                         }
                     }
                 });
-                p.addLast(new ChannelInboundHandlerAdapter() {
+                p.addLast(new ChannelHandler() {
                     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
                         if (evt == Http2ConnectionPrefaceAndSettingsFrameWrittenEvent.INSTANCE) {
                             prefaceWrittenLatch.countDown();
@@ -768,7 +768,7 @@ public class InboundHttp2ToHttpAdapterTest {
         }
 
         @Override
-        protected void channelRead0(ChannelHandlerContext ctx, HttpObject msg) throws Exception {
+        protected void messageReceived(ChannelHandlerContext ctx, HttpObject msg) throws Exception {
             listener.messageReceived(msg);
             latch.countDown();
             latch2.countDown();
@@ -786,7 +786,7 @@ public class InboundHttp2ToHttpAdapterTest {
         }
 
         @Override
-        protected void channelRead0(ChannelHandlerContext ctx, Http2Settings settings) throws Exception {
+        protected void messageReceived(ChannelHandlerContext ctx, Http2Settings settings) throws Exception {
             listener.messageReceived(settings);
             latch.countDown();
         }

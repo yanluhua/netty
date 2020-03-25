@@ -99,14 +99,15 @@ class EpollSocketTestPermutation extends SocketTestPermutation {
     }
 
     @Override
-    public List<TestsuitePermutation.BootstrapComboFactory<Bootstrap, Bootstrap>> datagram() {
+    public List<TestsuitePermutation.BootstrapComboFactory<Bootstrap, Bootstrap>> datagram(
+            final InternetProtocolFamily family) {
         // Make the list of Bootstrap factories.
         @SuppressWarnings("unchecked")
         List<BootstrapFactory<Bootstrap>> bfs = Arrays.asList(
                 () -> new Bootstrap().group(nioWorkerGroup).channelFactory(new ChannelFactory<Channel>() {
                     @Override
                     public Channel newChannel(EventLoop eventLoop) {
-                        return new NioDatagramChannel(eventLoop, InternetProtocolFamily.IPv4);
+                        return new NioDatagramChannel(eventLoop, family);
                     }
 
                     @Override
@@ -114,9 +115,39 @@ class EpollSocketTestPermutation extends SocketTestPermutation {
                         return NioDatagramChannel.class.getSimpleName() + ".class";
                     }
                 }),
-                () -> new Bootstrap().group(EPOLL_WORKER_GROUP).channel(EpollDatagramChannel.class)
+                () -> new Bootstrap().group(EPOLL_WORKER_GROUP).channelFactory(new ChannelFactory<Channel>() {
+                    @Override
+                    public Channel newChannel(EventLoop eventLoop) {
+                        return new EpollDatagramChannel(eventLoop, family);
+                    }
+
+                    @Override
+                    public String toString() {
+                        return InternetProtocolFamily.class.getSimpleName() + ".class";
+                    }
+                })
         );
         return combo(bfs, bfs);
+    }
+
+    List<TestsuitePermutation.BootstrapComboFactory<Bootstrap, Bootstrap>> epollOnlyDatagram(
+            final InternetProtocolFamily family) {
+        return combo(Collections.singletonList(datagramBootstrapFactory(family)),
+                Collections.singletonList(datagramBootstrapFactory(family)));
+    }
+
+    private BootstrapFactory<Bootstrap> datagramBootstrapFactory(final InternetProtocolFamily family) {
+        return () -> new Bootstrap().group(EPOLL_WORKER_GROUP).channelFactory(new ChannelFactory<Channel>() {
+            @Override
+            public Channel newChannel(EventLoop eventLoop) {
+                return new EpollDatagramChannel(eventLoop, family);
+            }
+
+            @Override
+            public String toString() {
+                return InternetProtocolFamily.class.getSimpleName() + ".class";
+            }
+        });
     }
 
     public List<TestsuitePermutation.BootstrapComboFactory<ServerBootstrap, Bootstrap>> domainSocket() {

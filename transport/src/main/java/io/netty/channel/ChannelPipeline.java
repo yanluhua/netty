@@ -40,7 +40,7 @@ import java.util.NoSuchElementException;
  * <h3>How an event flows in a pipeline</h3>
  *
  * The following diagram describes how I/O events are processed by {@link ChannelHandler}s in a {@link ChannelPipeline}
- * typically. An I/O event is handled by either a {@link ChannelInboundHandler} or a {@link ChannelOutboundHandler}
+ * typically. An I/O event is handled by a {@link ChannelHandler} (which may handle inbound or / and outbound events)
  * and be forwarded to its closest handler by calling the event propagation methods defined in
  * {@link ChannelHandlerContext}, such as {@link ChannelHandlerContext#fireChannelRead(Object)} and
  * {@link ChannelHandlerContext#write(Object)}.
@@ -156,7 +156,7 @@ import java.util.NoSuchElementException;
  * and the following example shows how the event propagation is usually done:
  *
  * <pre>
- * public class MyInboundHandler extends {@link ChannelInboundHandlerAdapter} {
+ * public class MyInboundHandler implements {@link ChannelInboundHandler} {
  *     {@code @Override}
  *     public void channelActive({@link ChannelHandlerContext} ctx) {
  *         System.out.println("Connected!");
@@ -164,7 +164,7 @@ import java.util.NoSuchElementException;
  *     }
  * }
  *
- * public class MyOutboundHandler extends {@link ChannelOutboundHandlerAdapter} {
+ * public class MyOutboundHandler implements {@link ChannelOutboundHandler} {
  *     {@code @Override}
  *     public void close({@link ChannelHandlerContext} ctx, {@link ChannelPromise} promise) {
  *         System.out.println("Closing ..");
@@ -436,6 +436,14 @@ public interface ChannelPipeline
      * @return the context of the last handler.  {@code null} if this pipeline is empty.
      */
     ChannelHandlerContext lastContext();
+
+    /**
+     * Returns {@code true} if this {@link ChannelPipeline} is empty, which means no {@link ChannelHandler} is
+     * present.
+     */
+    default boolean isEmpty() {
+        return lastContext() == null;
+    }
 
     /**
      * Returns the {@link ChannelHandler} with the specified name in this

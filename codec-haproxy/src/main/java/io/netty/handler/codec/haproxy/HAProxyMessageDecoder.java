@@ -18,11 +18,8 @@ package io.netty.handler.codec.haproxy;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.ByteToMessageDecoder;
-import io.netty.handler.codec.LineBasedFrameDecoder;
 import io.netty.handler.codec.ProtocolDetectionResult;
 import io.netty.util.CharsetUtil;
-
-import java.util.List;
 
 /**
  * Decodes an HAProxy proxy protocol header
@@ -49,11 +46,6 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
      * Maximum possible length for v2 additional TLV data (max unsigned short - max v2 address info space)
      */
     private static final int V2_MAX_TLV = 65535 - 216;
-
-    /**
-     * Version 1 header delimiter is always '\r\n' per spec
-     */
-    private static final int DELIMITER_LENGTH = 2;
 
     /**
      * Binary header prefix
@@ -99,6 +91,11 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
             ProtocolDetectionResult.detected(HAProxyProtocolVersion.V2);
 
     /**
+     * Used to extract a header frame out of the {@link ByteBuf} and return it.
+     */
+    private HeaderExtractor headerExtractor;
+
+    /**
      * {@code true} if we're discarding input because we're already over maxLength
      */
     private boolean discarding;
@@ -107,6 +104,11 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
      * Number of discarded bytes
      */
     private int discardedBytes;
+
+    /**
+     * Whether or not to throw an exception as soon as we exceed maxLength.
+     */
+    private final boolean failFast;
 
     /**
      * {@code true} if we're finished decoding the proxy protocol header
@@ -125,14 +127,27 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
     private final int v2MaxHeaderSize;
 
     /**
-     * Creates a new decoder with no additional data (TLV) restrictions
+     * Creates a new decoder with no additional data (TLV) restrictions, and should throw an exception as soon as
+     * we exceed maxLength.
      */
     public HAProxyMessageDecoder() {
-        v2MaxHeaderSize = V2_MAX_LENGTH;
+        this(true);
     }
 
     /**
-     * Creates a new decoder with restricted additional data (TLV) size
+     * Creates a new decoder with no additional data (TLV) restrictions, whether or not to throw an exception as soon
+     * as we exceed maxLength.
+     *
+     * @param failFast Whether or not to throw an exception as soon as we exceed maxLength
+     */
+    public HAProxyMessageDecoder(boolean failFast) {
+        v2MaxHeaderSize = V2_MAX_LENGTH;
+        this.failFast = failFast;
+    }
+
+    /**
+     * Creates a new decoder with restricted additional data (TLV) size, and should throw an exception as soon as
+     * we exceed maxLength.
      * <p>
      * <b>Note:</b> limiting TLV size only affects processing of v2, binary headers. Also, as allowed by the 1.5 spec
      * TLV data is currently ignored. For maximum performance it would be best to configure your upstream proxy host to
@@ -142,6 +157,17 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
      * @param maxTlvSize maximum number of bytes allowed for additional data (Type-Length-Value vectors) in a v2 header
      */
     public HAProxyMessageDecoder(int maxTlvSize) {
+        this(maxTlvSize, true);
+    }
+
+    /**
+     * Creates a new decoder with restricted additional data (TLV) size, whether or not to throw an exception as soon
+     * as we exceed maxLength.
+     *
+     * @param maxTlvSize maximum number of bytes allowed for additional data (Type-Length-Value vectors) in a v2 header
+     * @param failFast Whether or not to throw an exception as soon as we exceed maxLength
+     */
+    public HAProxyMessageDecoder(int maxTlvSize, boolean failFast) {
         if (maxTlvSize < 1) {
             v2MaxHeaderSize = V2_MIN_LENGTH;
         } else if (maxTlvSize > V2_MAX_TLV) {
@@ -154,6 +180,7 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
                 v2MaxHeaderSize = calcMax;
             }
         }
+        this.failFast = failFast;
     }
 
     /**
@@ -227,7 +254,15 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
     }
 
     @Override
-    protected final void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        ctx.fireExceptionCaught(cause);
+        if (cause instanceof HAProxyProtocolException) {
+            ctx.close(); // drop connection immediately per spec
+        }
+    }
+
+    @Override
+    protected final void decode(ChannelHandlerContext ctx, ByteBuf in) throws Exception {
         // determine the specification version
         if (version == -1) {
             if ((version = findVersion(in)) == -1) {
@@ -247,9 +282,9 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
             finished = true;
             try {
                 if (version == 1) {
-                    out.add(HAProxyMessage.decodeHeader(decoded.toString(CharsetUtil.US_ASCII)));
+                    ctx.fireChannelRead(HAProxyMessage.decodeHeader(decoded.toString(CharsetUtil.US_ASCII)));
                 } else {
-                    out.add(HAProxyMessage.decodeHeader(decoded));
+                    ctx.fireChannelRead(HAProxyMessage.decodeHeader(decoded));
                 }
             } catch (HAProxyProtocolException e) {
                 fail(ctx, null, e);
@@ -259,7 +294,6 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
 
     /**
      * Create a frame out of the {@link ByteBuf} and return it.
-     * Based on code from {@link LineBasedFrameDecoder#decode(ChannelHandlerContext, ByteBuf)}.
      *
      * @param ctx     the {@link ChannelHandlerContext} which this {@link HAProxyMessageDecoder} belongs to
      * @param buffer  the {@link ByteBuf} from which to read data
@@ -267,42 +301,14 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
      *                be created
      */
     private ByteBuf decodeStruct(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
-        final int eoh = findEndOfHeader(buffer);
-        if (!discarding) {
-            if (eoh >= 0) {
-                final int length = eoh - buffer.readerIndex();
-                if (length > v2MaxHeaderSize) {
-                    buffer.readerIndex(eoh);
-                    failOverLimit(ctx, length);
-                    return null;
-                }
-                return buffer.readSlice(length);
-            } else {
-                final int length = buffer.readableBytes();
-                if (length > v2MaxHeaderSize) {
-                    discardedBytes = length;
-                    buffer.skipBytes(length);
-                    discarding = true;
-                    failOverLimit(ctx, "over " + discardedBytes);
-                }
-                return null;
-            }
-        } else {
-            if (eoh >= 0) {
-                buffer.readerIndex(eoh);
-                discardedBytes = 0;
-                discarding = false;
-            } else {
-                discardedBytes = buffer.readableBytes();
-                buffer.skipBytes(discardedBytes);
-            }
-            return null;
+        if (headerExtractor == null) {
+            headerExtractor = new StructHeaderExtractor(v2MaxHeaderSize);
         }
+        return headerExtractor.extract(ctx, buffer);
     }
 
     /**
      * Create a frame out of the {@link ByteBuf} and return it.
-     * Based on code from {@link LineBasedFrameDecoder#decode(ChannelHandlerContext, ByteBuf)}.
      *
      * @param ctx     the {@link ChannelHandlerContext} which this {@link HAProxyMessageDecoder} belongs to
      * @param buffer  the {@link ByteBuf} from which to read data
@@ -310,40 +316,10 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
      *                be created
      */
     private ByteBuf decodeLine(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
-        final int eol = findEndOfLine(buffer);
-        if (!discarding) {
-            if (eol >= 0) {
-                final int length = eol - buffer.readerIndex();
-                if (length > V1_MAX_LENGTH) {
-                    buffer.readerIndex(eol + DELIMITER_LENGTH);
-                    failOverLimit(ctx, length);
-                    return null;
-                }
-                ByteBuf frame = buffer.readSlice(length);
-                buffer.skipBytes(DELIMITER_LENGTH);
-                return frame;
-            } else {
-                final int length = buffer.readableBytes();
-                if (length > V1_MAX_LENGTH) {
-                    discardedBytes = length;
-                    buffer.skipBytes(length);
-                    discarding = true;
-                    failOverLimit(ctx, "over " + discardedBytes);
-                }
-                return null;
-            }
-        } else {
-            if (eol >= 0) {
-                final int delimLength = buffer.getByte(eol) == '\r' ? 2 : 1;
-                buffer.readerIndex(eol + delimLength);
-                discardedBytes = 0;
-                discarding = false;
-            } else {
-                discardedBytes = buffer.readableBytes();
-                buffer.skipBytes(discardedBytes);
-            }
-            return null;
+        if (headerExtractor == null) {
+            headerExtractor = new LineHeaderExtractor(V1_MAX_LENGTH);
         }
+        return headerExtractor.extract(ctx, buffer);
     }
 
     private void failOverLimit(final ChannelHandlerContext ctx, int length) {
@@ -357,7 +333,6 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
 
     private void fail(final ChannelHandlerContext ctx, String errMsg, Exception e) {
         finished = true;
-        ctx.close(); // drop connection immediately per spec
         HAProxyProtocolException ppex;
         if (errMsg != null && e != null) {
             ppex = new HAProxyProtocolException(errMsg, e);
@@ -398,5 +373,120 @@ public class HAProxyMessageDecoder extends ByteToMessageDecoder {
             }
         }
         return true;
+    }
+
+    /**
+     * HeaderExtractor create a header frame out of the {@link ByteBuf}.
+     */
+    private abstract class HeaderExtractor {
+        /** Header max size */
+        private final int maxHeaderSize;
+
+        protected HeaderExtractor(int maxHeaderSize) {
+            this.maxHeaderSize = maxHeaderSize;
+        }
+
+        /**
+         * Create a frame out of the {@link ByteBuf} and return it.
+         *
+         * @param ctx     the {@link ChannelHandlerContext} which this {@link HAProxyMessageDecoder} belongs to
+         * @param buffer  the {@link ByteBuf} from which to read data
+         * @return frame  the {@link ByteBuf} which represent the frame or {@code null} if no frame could
+         *                be created
+         * @throws Exception if exceed maxLength
+         */
+        public ByteBuf extract(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
+            final int eoh = findEndOfHeader(buffer);
+            if (!discarding) {
+                if (eoh >= 0) {
+                    final int length = eoh - buffer.readerIndex();
+                    if (length > maxHeaderSize) {
+                        buffer.readerIndex(eoh + delimiterLength(buffer, eoh));
+                        failOverLimit(ctx, length);
+                        return null;
+                    }
+                    ByteBuf frame = buffer.readSlice(length);
+                    buffer.skipBytes(delimiterLength(buffer, eoh));
+                    return frame;
+                } else {
+                    final int length = buffer.readableBytes();
+                    if (length > maxHeaderSize) {
+                        discardedBytes = length;
+                        buffer.skipBytes(length);
+                        discarding = true;
+                        if (failFast) {
+                            failOverLimit(ctx, "over " + discardedBytes);
+                        }
+                    }
+                    return null;
+                }
+            } else {
+                if (eoh >= 0) {
+                    final int length = discardedBytes + eoh - buffer.readerIndex();
+                    buffer.readerIndex(eoh + delimiterLength(buffer, eoh));
+                    discardedBytes = 0;
+                    discarding = false;
+                    if (!failFast) {
+                        failOverLimit(ctx, "over " + length);
+                    }
+                } else {
+                    discardedBytes += buffer.readableBytes();
+                    buffer.skipBytes(buffer.readableBytes());
+                }
+                return null;
+            }
+        }
+
+        /**
+         * Find the end of the header from the given {@link ByteBuf}，the end may be a CRLF, or the length given by the
+         * header.
+         *
+         * @param buffer the buffer to be searched
+         * @return {@code -1} if can not find the end, otherwise return the buffer index of end
+         */
+        protected abstract int findEndOfHeader(ByteBuf buffer);
+
+        /**
+         * Get the length of the header delimiter.
+         *
+         * @param buffer the buffer where delimiter is located
+         * @param eoh index of delimiter
+         * @return length of the delimiter
+         */
+        protected abstract int delimiterLength(ByteBuf buffer, int eoh);
+    }
+
+    private final class LineHeaderExtractor extends HeaderExtractor {
+
+        LineHeaderExtractor(int maxHeaderSize) {
+            super(maxHeaderSize);
+        }
+
+        @Override
+        protected int findEndOfHeader(ByteBuf buffer) {
+            return findEndOfLine(buffer);
+        }
+
+        @Override
+        protected int delimiterLength(ByteBuf buffer, int eoh) {
+            return buffer.getByte(eoh) == '\r' ? 2 : 1;
+        }
+    }
+
+    private final class StructHeaderExtractor extends HeaderExtractor {
+
+        StructHeaderExtractor(int maxHeaderSize) {
+            super(maxHeaderSize);
+        }
+
+        @Override
+        protected int findEndOfHeader(ByteBuf buffer) {
+            return HAProxyMessageDecoder.findEndOfHeader(buffer);
+        }
+
+        @Override
+        protected int delimiterLength(ByteBuf buffer, int eoh) {
+            return 0;
+        }
     }
 }

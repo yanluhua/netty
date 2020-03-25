@@ -19,15 +19,16 @@ package io.netty.handler.proxy;
 import static java.util.Objects.requireNonNull;
 
 import io.netty.channel.Channel;
-import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.PendingWriteQueue;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.DefaultPromise;
-import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.ImmediateEventExecutor;
+import io.netty.util.concurrent.Promise;
 import io.netty.util.concurrent.ScheduledFuture;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
@@ -36,7 +37,7 @@ import java.net.SocketAddress;
 import java.nio.channels.ConnectionPendingException;
 import java.util.concurrent.TimeUnit;
 
-public abstract class ProxyHandler extends ChannelDuplexHandler {
+public abstract class ProxyHandler implements ChannelHandler {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(ProxyHandler.class);
 
@@ -59,7 +60,7 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
     private boolean finished;
     private boolean suppressChannelReadComplete;
     private boolean flushedPrematurely;
-    private final LazyChannelPromise connectPromise = new LazyChannelPromise();
+    private final Promise<Channel> connectPromise = new LazyPromise();
     private ScheduledFuture<?> connectTimeoutFuture;
     private final ChannelFutureListener writeListener = future -> {
         if (!future.isSuccess()) {
@@ -440,13 +441,19 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
         pendingWrites.add(msg, promise);
     }
 
-    private final class LazyChannelPromise extends DefaultPromise<Channel> {
+    private final class LazyPromise extends DefaultPromise<Channel> {
+
+        LazyPromise() {
+            super(ImmediateEventExecutor.INSTANCE);
+        }
+
         @Override
-        protected EventExecutor executor() {
+        protected void checkDeadLock() {
             if (ctx == null) {
-                throw new IllegalStateException();
+                // If ctx is null the handlerAdded(...) callback was not called yet.
+                return;
             }
-            return ctx.executor();
+            checkDeadLock(ctx.executor());
         }
     }
 }

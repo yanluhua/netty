@@ -661,7 +661,7 @@ public final class EmptyByteBuf extends ByteBuf {
     @Override
     public CharSequence readCharSequence(int length, Charset charset) {
         checkLength(length);
-        return null;
+        return StringUtil.EMPTY_STRING;
     }
 
     @Override
@@ -937,6 +937,11 @@ public final class EmptyByteBuf extends ByteBuf {
         } else {
             throw new UnsupportedOperationException();
         }
+    }
+
+    @Override
+    public boolean isContiguous() {
+        return true;
     }
 
     @Override

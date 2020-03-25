@@ -19,6 +19,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.CharsetUtil;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import java.net.SocketAddress;
@@ -237,7 +238,7 @@ public class ChannelOutboundBufferTest {
     @Test
     public void testWritability() {
         final StringBuilder buf = new StringBuilder();
-        EmbeddedChannel ch = new EmbeddedChannel(new ChannelInboundHandlerAdapter() {
+        EmbeddedChannel ch = new EmbeddedChannel(new ChannelHandler() {
             @Override
             public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
                 buf.append(ctx.channel().isWritable());
@@ -272,7 +273,7 @@ public class ChannelOutboundBufferTest {
     @Test
     public void testUserDefinedWritability() {
         final StringBuilder buf = new StringBuilder();
-        EmbeddedChannel ch = new EmbeddedChannel(new ChannelInboundHandlerAdapter() {
+        EmbeddedChannel ch = new EmbeddedChannel(new ChannelHandler() {
             @Override
             public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
                 buf.append(ctx.channel().isWritable());
@@ -306,7 +307,7 @@ public class ChannelOutboundBufferTest {
     @Test
     public void testUserDefinedWritability2() {
         final StringBuilder buf = new StringBuilder();
-        EmbeddedChannel ch = new EmbeddedChannel(new ChannelInboundHandlerAdapter() {
+        EmbeddedChannel ch = new EmbeddedChannel(new ChannelHandler() {
             @Override
             public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
                 buf.append(ctx.channel().isWritable());
@@ -346,7 +347,7 @@ public class ChannelOutboundBufferTest {
     @Test
     public void testMixedWritability() {
         final StringBuilder buf = new StringBuilder();
-        EmbeddedChannel ch = new EmbeddedChannel(new ChannelInboundHandlerAdapter() {
+        EmbeddedChannel ch = new EmbeddedChannel(new ChannelHandler() {
             @Override
             public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
                 buf.append(ctx.channel().isWritable());
@@ -359,25 +360,27 @@ public class ChannelOutboundBufferTest {
 
         ChannelOutboundBuffer cob = ch.unsafe().outboundBuffer();
 
-        // Trigger channelWritabilityChanged() by writing a lot.
-        ch.write(buffer().writeZero(257));
-        assertThat(buf.toString(), is("false "));
+        ch.eventLoop().execute(() -> {
+            // Trigger channelWritabilityChanged() by writing a lot.
+            ch.write(buffer().writeZero(257));
+            assertThat(buf.toString(), is("false "));
 
-        // Ensure that setting a user-defined writability flag to false does not trigger channelWritabilityChanged()
-        cob.setUserDefinedWritability(1, false);
-        ch.runPendingTasks();
-        assertThat(buf.toString(), is("false "));
+            // Ensure that setting a user-defined writability flag to false does not trigger channelWritabilityChanged()
+            cob.setUserDefinedWritability(1, false);
+            ch.runPendingTasks();
+            assertThat(buf.toString(), is("false "));
 
-        // Ensure reducing the totalPendingWriteBytes down to zero does not trigger channelWritabilityChanged()
-        // because of the user-defined writability flag.
-        ch.flush();
-        assertThat(cob.totalPendingWriteBytes(), is(0L));
-        assertThat(buf.toString(), is("false "));
+            // Ensure reducing the totalPendingWriteBytes down to zero does not trigger channelWritabilityChanged()
+            // because of the user-defined writability flag.
+            ch.flush();
+            assertThat(cob.totalPendingWriteBytes(), is(0L));
+            assertThat(buf.toString(), is("false "));
 
-        // Ensure that setting the user-defined writability flag to true triggers channelWritabilityChanged()
-        cob.setUserDefinedWritability(1, true);
-        ch.runPendingTasks();
-        assertThat(buf.toString(), is("false true "));
+            // Ensure that setting the user-defined writability flag to true triggers channelWritabilityChanged()
+            cob.setUserDefinedWritability(1, true);
+            ch.runPendingTasks();
+            assertThat(buf.toString(), is("false true "));
+        });
 
         safeClose(ch);
     }

@@ -20,9 +20,9 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandler;
-import io.netty.channel.ChannelHandlerAdapter;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.handler.logging.LogLevel;
+import io.netty.handler.logging.LoggingHandler;
 import io.netty.util.NetUtil;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ResourceLeakDetector;
@@ -78,13 +78,13 @@ public class EpollReuseAddrTest {
     }
 
     private static void testMultipleBindDatagramChannelWithoutReusePortFails0(AbstractBootstrap<?, ?, ?> bootstrap) {
-        bootstrap.handler(new DummyHandler());
+        bootstrap.handler(new LoggingHandler(LogLevel.ERROR));
         ChannelFuture future = bootstrap.bind().syncUninterruptibly();
         try {
             bootstrap.bind(future.channel().localAddress()).syncUninterruptibly();
             Assert.fail();
         } catch (Exception e) {
-            Assert.assertTrue(e instanceof IOException);
+            Assert.assertTrue(e.getCause() instanceof IOException);
         }
         future.channel().close().syncUninterruptibly();
     }
@@ -200,7 +200,7 @@ public class EpollReuseAddrTest {
     }
 
     @ChannelHandler.Sharable
-    private static class ServerSocketTestHandler extends ChannelInboundHandlerAdapter {
+    private static class ServerSocketTestHandler implements ChannelHandler {
         private final AtomicBoolean accepted;
 
         ServerSocketTestHandler(AtomicBoolean accepted) {
@@ -215,7 +215,7 @@ public class EpollReuseAddrTest {
     }
 
     @ChannelHandler.Sharable
-    private static class DatagramSocketTestHandler extends ChannelInboundHandlerAdapter {
+    private static class DatagramSocketTestHandler implements ChannelHandler {
         private final AtomicBoolean received;
 
         DatagramSocketTestHandler(AtomicBoolean received) {
@@ -230,5 +230,5 @@ public class EpollReuseAddrTest {
     }
 
     @ChannelHandler.Sharable
-    private static final class DummyHandler extends ChannelHandlerAdapter { }
+    private static final class DummyHandler implements ChannelHandler { }
 }

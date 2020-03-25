@@ -57,7 +57,7 @@ public class ChannelInitializerTest {
         client = new Bootstrap()
                 .group(group)
                 .channel(LocalChannel.class)
-                .handler(new ChannelInboundHandlerAdapter());
+                .handler(new ChannelHandler() { });
         testHandler = new InspectableHandler();
     }
 
@@ -109,10 +109,10 @@ public class ChannelInitializerTest {
 
     @Test
     public void testChannelInitializerInInitializerCorrectOrdering() {
-        final ChannelInboundHandlerAdapter handler1 = new ChannelInboundHandlerAdapter();
-        final ChannelInboundHandlerAdapter handler2 = new ChannelInboundHandlerAdapter();
-        final ChannelInboundHandlerAdapter handler3 = new ChannelInboundHandlerAdapter();
-        final ChannelInboundHandlerAdapter handler4 = new ChannelInboundHandlerAdapter();
+        final ChannelHandler handler1 = new ChannelHandler() { };
+        final ChannelHandler handler2 = new ChannelHandler() { };
+        final ChannelHandler handler3 = new ChannelHandler() { };
+        final ChannelHandler handler4 = new ChannelHandler() { };
 
         client.handler(new ChannelInitializer<Channel>() {
             @Override
@@ -150,7 +150,7 @@ public class ChannelInitializerTest {
     @Test
     public void testChannelInitializerReentrance() {
         final AtomicInteger registeredCalled = new AtomicInteger(0);
-        final ChannelInboundHandlerAdapter handler1 = new ChannelInboundHandlerAdapter() {
+        final ChannelHandler handler1 = new ChannelHandler() {
             @Override
             public void channelRegistered(ChannelHandlerContext ctx) throws Exception {
                 registeredCalled.incrementAndGet();
@@ -251,7 +251,7 @@ public class ChannelInitializerTest {
         }
     }
 
-    private static final class InspectableHandler extends ChannelDuplexHandler {
+    private static final class InspectableHandler implements ChannelHandler {
         final AtomicInteger channelRegisteredCount = new AtomicInteger(0);
 
         @Override

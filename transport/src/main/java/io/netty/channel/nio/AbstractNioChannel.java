@@ -28,7 +28,6 @@ import io.netty.channel.ConnectTimeoutException;
 import io.netty.channel.EventLoop;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
-import io.netty.util.internal.ThrowableUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -48,9 +47,6 @@ public abstract class AbstractNioChannel extends AbstractChannel {
 
     private static final InternalLogger logger =
             InternalLoggerFactory.getInstance(AbstractNioChannel.class);
-
-    private static final ClosedChannelException DO_CLOSE_CLOSED_CHANNEL_EXCEPTION = ThrowableUtil.unknownStackTrace(
-            new ClosedChannelException(), AbstractNioChannel.class, "doClose()");
 
     private final SelectableChannel ch;
     protected final int readInterestOp;
@@ -84,10 +80,8 @@ public abstract class AbstractNioChannel extends AbstractChannel {
             try {
                 ch.close();
             } catch (IOException e2) {
-                if (logger.isWarnEnabled()) {
-                    logger.warn(
+                logger.warn(
                             "Failed to close a partially initialized socket.", e2);
-                }
             }
 
             throw new ChannelException("Failed to enter non-blocking mode.", e);
@@ -109,10 +103,10 @@ public abstract class AbstractNioChannel extends AbstractChannel {
     }
 
     /**
-     * Return the current {@link SelectionKey}
+     * Return the current {@link SelectionKey} or {@code null} if the underlying channel was not registered with the
+     * {@link java.nio.channels.Selector} yet.
      */
     protected SelectionKey selectionKey() {
-        assert selectionKey != null;
         return selectionKey;
     }
 
@@ -206,7 +200,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
             // Check first if the key is still valid as it may be canceled as part of the deregistration
             // from the EventLoop
             // See https://github.com/netty/netty/issues/2104
-            if (!key.isValid()) {
+            if (key == null || !key.isValid()) {
                 return;
             }
             int interestOps = key.interestOps();
@@ -348,7 +342,8 @@ public abstract class AbstractNioChannel extends AbstractChannel {
 
         private boolean isFlushPending() {
             SelectionKey selectionKey = selectionKey();
-            return selectionKey.isValid() && (selectionKey.interestOps() & SelectionKey.OP_WRITE) != 0;
+            return selectionKey != null && selectionKey.isValid()
+                    && (selectionKey.interestOps() & SelectionKey.OP_WRITE) != 0;
         }
     }
 
@@ -462,7 +457,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
         ChannelPromise promise = connectPromise;
         if (promise != null) {
             // Use tryFailure() instead of setFailure() to avoid the race against cancel().
-            promise.tryFailure(DO_CLOSE_CLOSED_CHANNEL_EXCEPTION);
+            promise.tryFailure(new ClosedChannelException());
             connectPromise = null;
         }
 

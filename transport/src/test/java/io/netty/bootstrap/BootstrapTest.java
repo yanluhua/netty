@@ -16,14 +16,19 @@
 
 package io.netty.bootstrap;
 
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelConfig;
+import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandler.Sharable;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandler;
-import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPromise;
+import io.netty.channel.DefaultChannelConfig;
+import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.MultithreadEventLoopGroup;
 import io.netty.channel.local.LocalAddress;
@@ -47,6 +52,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 
@@ -57,13 +63,14 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 public class BootstrapTest {
 
     private static final EventLoopGroup groupA = new MultithreadEventLoopGroup(1, LocalHandler.newFactory());
     private static final EventLoopGroup groupB = new MultithreadEventLoopGroup(1, LocalHandler.newFactory());
-    private static final ChannelInboundHandler dummyHandler = new DummyHandler();
+    private static final ChannelHandler dummyHandler = new DummyHandler();
 
     @AfterClass
     public static void destroy() {
@@ -205,7 +212,7 @@ public class BootstrapTest {
     }
 
     @Test(expected = ConnectException.class, timeout = 10000)
-    public void testLateRegistrationConnect() throws Exception {
+    public void testLateRegistrationConnect() throws Throwable {
         EventLoopGroup group = new MultithreadEventLoopGroup(1, LocalHandler.newFactory());
         LateRegisterHandler registerHandler = new LateRegisterHandler();
         try {
@@ -217,6 +224,8 @@ public class BootstrapTest {
             assertFalse(future.isDone());
             registerHandler.registerPromise().setSuccess();
             future.syncUninterruptibly();
+        } catch (CompletionException e) {
+            throw e.getCause();
         } finally {
             group.shutdownGracefully();
         }
@@ -282,7 +291,57 @@ public class BootstrapTest {
         assertThat(connectFuture.channel(), is(not(nullValue())));
     }
 
-    private static final class LateRegisterHandler extends ChannelOutboundHandlerAdapter {
+    @Test
+    public void testChannelOptionOrderPreserve() throws InterruptedException {
+        final BlockingQueue<ChannelOption<?>> options = new LinkedBlockingQueue<>();
+        class ChannelConfigValidator extends DefaultChannelConfig {
+            ChannelConfigValidator(Channel channel) {
+                super(channel);
+            }
+
+            @Override
+            public <T> boolean setOption(ChannelOption<T> option, T value) {
+                options.add(option);
+                return super.setOption(option, value);
+            }
+        }
+        final CountDownLatch latch = new CountDownLatch(1);
+        final Bootstrap bootstrap = new Bootstrap()
+                .handler(new ChannelInitializer() {
+                    @Override
+                    protected void initChannel(Channel ch) {
+                        latch.countDown();
+                    }
+                })
+                .group(groupA)
+                .channelFactory(new ChannelFactory<Channel>() {
+                    @Override
+                    public Channel newChannel(EventLoop eventLoop) {
+                        return new LocalChannel(eventLoop) {
+                            private ChannelConfigValidator config;
+                            @Override
+                            public synchronized ChannelConfig config() {
+                                if (config == null) {
+                                    config = new ChannelConfigValidator(this);
+                                }
+                                return config;
+                            }
+                        };
+                    }
+                })
+                .option(ChannelOption.WRITE_BUFFER_LOW_WATER_MARK, 1)
+                .option(ChannelOption.WRITE_BUFFER_HIGH_WATER_MARK, 2);
+
+        bootstrap.register().syncUninterruptibly();
+
+        latch.await();
+
+        // Check the order is the same as what we defined before.
+        assertSame(ChannelOption.WRITE_BUFFER_LOW_WATER_MARK, options.take());
+        assertSame(ChannelOption.WRITE_BUFFER_HIGH_WATER_MARK, options.take());
+    }
+
+    private static final class LateRegisterHandler implements ChannelHandler {
 
         private final CountDownLatch latch = new CountDownLatch(1);
         private ChannelPromise registerPromise;
@@ -297,7 +356,7 @@ public class BootstrapTest {
                     registerPromise.tryFailure(future.cause());
                 }
             });
-            super.register(ctx, newPromise);
+            ctx.register(newPromise);
         }
 
         ChannelPromise registerPromise() throws InterruptedException {
@@ -307,7 +366,7 @@ public class BootstrapTest {
     }
 
     @Sharable
-    private static final class DummyHandler extends ChannelInboundHandlerAdapter { }
+    private static final class DummyHandler implements ChannelHandler { }
 
     private static final class TestAddressResolverGroup extends AddressResolverGroup<SocketAddress> {
 

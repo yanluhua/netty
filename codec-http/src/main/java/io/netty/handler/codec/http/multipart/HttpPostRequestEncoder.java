@@ -636,7 +636,7 @@ public class HttpPostRequestEncoder implements ChunkedInput<HttpContent> {
                         replacement.append("; ")
                                    .append(HttpHeaderValues.FILENAME)
                                    .append("=\"")
-                                   .append(fileUpload.getFilename())
+                                   .append(currentFileUpload.getFilename())
                                    .append('"');
                     }
 
@@ -865,7 +865,7 @@ public class HttpPostRequestEncoder implements ChunkedInput<HttpContent> {
 
     /**
      *
-     * @return the next ByteBuf to send as a HttpChunk and modifying currentBuffer accordingly
+     * @return the next ByteBuf to send as an HttpChunk and modifying currentBuffer accordingly
      */
     private ByteBuf fillByteBuf() {
         int length = currentBuffer.readableBytes();
@@ -975,7 +975,11 @@ public class HttpPostRequestEncoder implements ChunkedInput<HttpContent> {
         if (buffer.capacity() == 0) {
             currentData = null;
             if (currentBuffer == null) {
-                currentBuffer = delimiter;
+                if (delimiter == null) {
+                    return null;
+                } else {
+                    currentBuffer = delimiter;
+                }
             } else {
                 if (delimiter != null) {
                     currentBuffer = wrappedBuffer(currentBuffer, delimiter);

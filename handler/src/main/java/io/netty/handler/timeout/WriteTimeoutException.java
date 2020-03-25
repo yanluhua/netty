@@ -16,8 +16,8 @@
 package io.netty.handler.timeout;
 
 /**
- * A {@link TimeoutException} raised by {@link WriteTimeoutHandler} when no data
- * was written within a certain period of time.
+ * A {@link TimeoutException} raised by {@link WriteTimeoutHandler} when a write operation
+ * cannot finish in a certain period of time.
  */
 public final class WriteTimeoutException extends TimeoutException {
 
@@ -25,5 +25,8 @@ public final class WriteTimeoutException extends TimeoutException {
 
     public static final WriteTimeoutException INSTANCE = new WriteTimeoutException();
 
-    private WriteTimeoutException() { }
+    private WriteTimeoutException() {
+        super(true);
+    }
+
 }

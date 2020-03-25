@@ -14,12 +14,19 @@
  * under the License.
  */package io.netty.buffer;
 
+import io.netty.util.CharsetUtil;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.*;
 import static org.junit.Assert.*;
 
 public class EmptyByteBufTest {
+
+    @Test
+    public void testIsContiguous() {
+        EmptyByteBuf empty = new EmptyByteBuf(UnpooledByteBufAllocator.DEFAULT);
+        assertTrue(empty.isContiguous());
+    }
 
     @Test
     public void testIsWritable() {
@@ -93,4 +100,11 @@ public class EmptyByteBufTest {
         assertTrue(emptyAbstract.release());
         assertFalse(empty.release());
     }
+
+    @Test
+    public void testGetCharSequence() {
+        EmptyByteBuf empty = new EmptyByteBuf(UnpooledByteBufAllocator.DEFAULT);
+        assertEquals("", empty.readCharSequence(0, CharsetUtil.US_ASCII));
+    }
+
 }

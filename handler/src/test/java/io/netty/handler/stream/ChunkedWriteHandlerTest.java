@@ -20,19 +20,23 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.CharsetUtil;
 import io.netty.util.ReferenceCountUtil;
+import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.channels.Channels;
+import java.nio.channels.ClosedChannelException;
+import java.nio.channels.FileChannel;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -100,6 +104,41 @@ public class ChunkedWriteHandlerTest {
         check(new ChunkedNioFile(TMP));
 
         check(new ChunkedNioFile(TMP), new ChunkedNioFile(TMP), new ChunkedNioFile(TMP));
+    }
+
+    @Test
+    public void testChunkedNioFileLeftPositionUnchanged() throws IOException {
+        FileChannel in = null;
+        final long expectedPosition = 10;
+        try {
+            in = new RandomAccessFile(TMP, "r").getChannel();
+            in.position(expectedPosition);
+            check(new ChunkedNioFile(in) {
+                @Override
+                public void close() throws Exception {
+                    //no op
+                }
+            });
+            Assert.assertTrue(in.isOpen());
+            Assert.assertEquals(expectedPosition, in.position());
+        } finally {
+            if (in != null) {
+                in.close();
+            }
+        }
+    }
+
+    @Test(expected = ClosedChannelException.class)
+    public void testChunkedNioFileFailOnClosedFileChannel() throws IOException {
+        final FileChannel in = new RandomAccessFile(TMP, "r").getChannel();
+        in.close();
+        check(new ChunkedNioFile(in) {
+            @Override
+            public void close() throws Exception {
+                //no op
+            }
+        });
+        Assert.fail();
     }
 
     @Test
@@ -273,7 +312,7 @@ public class ChunkedWriteHandlerTest {
     // See https://github.com/netty/netty/issues/8700.
     @Test
     public void testFailureWhenLastChunkFailed() throws IOException {
-        ChannelOutboundHandlerAdapter failLast = new ChannelOutboundHandlerAdapter() {
+        ChannelHandler failLast = new ChannelHandler() {
             private int passedWrites;
 
             @Override
@@ -409,7 +448,7 @@ public class ChunkedWriteHandlerTest {
             }
         };
 
-        ChannelOutboundHandlerAdapter noOpWrites = new ChannelOutboundHandlerAdapter() {
+        ChannelHandler noOpWrites = new ChannelHandler() {
             @Override
             public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
                 ReferenceCountUtil.release(msg);
@@ -474,12 +513,9 @@ public class ChunkedWriteHandlerTest {
         final CountDownLatch listenerInvoked = new CountDownLatch(1);
 
         ChannelFuture writeFuture = ch.write(input);
-        writeFuture.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                inputClosedWhenListenerInvoked.set(input.isClosed());
-                listenerInvoked.countDown();
-            }
+        writeFuture.addListener((ChannelFutureListener) future -> {
+            inputClosedWhenListenerInvoked.set(input.isClosed());
+            listenerInvoked.countDown();
         });
         ch.flush();
 
@@ -498,12 +534,9 @@ public class ChunkedWriteHandlerTest {
         final CountDownLatch listenerInvoked = new CountDownLatch(1);
 
         ChannelFuture writeFuture = ch.write(input);
-        writeFuture.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                inputClosedWhenListenerInvoked.set(input.isClosed());
-                listenerInvoked.countDown();
-            }
+        writeFuture.addListener((ChannelFutureListener) future -> {
+            inputClosedWhenListenerInvoked.set(input.isClosed());
+            listenerInvoked.countDown();
         });
         ch.flush();
 
@@ -523,12 +556,9 @@ public class ChunkedWriteHandlerTest {
         final CountDownLatch listenerInvoked = new CountDownLatch(1);
 
         ChannelFuture writeFuture = ch.write(input);
-        writeFuture.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                inputClosedWhenListenerInvoked.set(input.isClosed());
-                listenerInvoked.countDown();
-            }
+        writeFuture.addListener((ChannelFutureListener) future -> {
+            inputClosedWhenListenerInvoked.set(input.isClosed());
+            listenerInvoked.countDown();
         });
         ch.close(); // close channel to make handler discard the input on subsequent flush
         ch.flush();
@@ -549,12 +579,9 @@ public class ChunkedWriteHandlerTest {
         final CountDownLatch listenerInvoked = new CountDownLatch(1);
 
         ChannelFuture writeFuture = ch.write(input);
-        writeFuture.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                inputClosedWhenListenerInvoked.set(input.isClosed());
-                listenerInvoked.countDown();
-            }
+        writeFuture.addListener((ChannelFutureListener) future -> {
+            inputClosedWhenListenerInvoked.set(input.isClosed());
+            listenerInvoked.countDown();
         });
         ch.close(); // close channel to make handler discard the input on subsequent flush
         ch.flush();
@@ -595,7 +622,7 @@ public class ChunkedWriteHandlerTest {
     }
 
     private static void checkFirstFailed(Object input) {
-        ChannelOutboundHandlerAdapter noOpWrites = new ChannelOutboundHandlerAdapter() {
+        ChannelHandler noOpWrites = new ChannelHandler() {
             @Override
             public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
                 ReferenceCountUtil.release(msg);
@@ -612,7 +639,7 @@ public class ChunkedWriteHandlerTest {
     }
 
     private static void checkSkipFailed(Object input1, Object input2) {
-        ChannelOutboundHandlerAdapter failFirst = new ChannelOutboundHandlerAdapter() {
+        ChannelHandler failFirst = new ChannelHandler() {
             private boolean alreadyFailed;
 
             @Override

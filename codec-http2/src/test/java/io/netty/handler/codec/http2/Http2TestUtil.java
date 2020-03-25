@@ -35,7 +35,6 @@ import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-import java.util.List;
 import java.util.Random;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
@@ -116,7 +115,7 @@ public final class Http2TestUtil {
 
     public static HpackEncoder newTestEncoder(boolean ignoreMaxHeaderListSize,
                                               long maxHeaderListSize, long maxHeaderTableSize) throws Http2Exception {
-        HpackEncoder hpackEncoder = new HpackEncoder();
+        HpackEncoder hpackEncoder = new HpackEncoder(false, 16, 0);
         ByteBuf buf = Unpooled.buffer();
         try {
             hpackEncoder.setMaxHeaderTableSize(buf, maxHeaderTableSize);
@@ -136,7 +135,7 @@ public final class Http2TestUtil {
     }
 
     public static HpackDecoder newTestDecoder(long maxHeaderListSize, long maxHeaderTableSize) throws Http2Exception {
-        HpackDecoder hpackDecoder = new HpackDecoder(maxHeaderListSize, 32);
+        HpackDecoder hpackDecoder = new HpackDecoder(maxHeaderListSize);
         hpackDecoder.setMaxHeaderTableSize(maxHeaderTableSize);
         return hpackDecoder;
     }
@@ -197,7 +196,7 @@ public final class Http2TestUtil {
         }
 
         @Override
-        protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+        protected void decode(ChannelHandlerContext ctx, ByteBuf in) throws Exception {
             reader.readFrame(ctx, in, new Http2FrameListener() {
                 @Override
                 public int onDataRead(ChannelHandlerContext ctx, int streamId, ByteBuf data, int padding,
@@ -639,6 +638,10 @@ public final class Http2TestUtil {
 
     static ByteBuf bb(String s) {
         return ByteBufUtil.writeUtf8(UnpooledByteBufAllocator.DEFAULT, s);
+    }
+
+    static ByteBuf bb(int size) {
+        return UnpooledByteBufAllocator.DEFAULT.buffer().writeZero(size);
     }
 
     static void assertEqualsAndRelease(Http2Frame expected, Http2Frame actual) {

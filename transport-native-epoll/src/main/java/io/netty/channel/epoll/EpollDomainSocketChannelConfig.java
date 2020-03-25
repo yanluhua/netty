@@ -22,14 +22,22 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.MessageSizeEstimator;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.WriteBufferWaterMark;
+import io.netty.channel.socket.SocketChannelConfig;
 import io.netty.channel.unix.DomainSocketChannelConfig;
 import io.netty.channel.unix.DomainSocketReadMode;
 
+import java.io.IOException;
 import java.util.Map;
+
+import static io.netty.channel.ChannelOption.ALLOW_HALF_CLOSURE;
+import static io.netty.channel.ChannelOption.SO_RCVBUF;
+import static io.netty.channel.ChannelOption.SO_SNDBUF;
+import static io.netty.channel.unix.UnixChannelOption.DOMAIN_SOCKET_READ_MODE;
 
 public final class EpollDomainSocketChannelConfig extends EpollChannelConfig
         implements DomainSocketChannelConfig {
     private volatile DomainSocketReadMode mode = DomainSocketReadMode.BYTES;
+    private volatile boolean allowHalfClosure;
 
     EpollDomainSocketChannelConfig(AbstractEpollChannel channel) {
         super(channel);
@@ -37,14 +45,23 @@ public final class EpollDomainSocketChannelConfig extends EpollChannelConfig
 
     @Override
     public Map<ChannelOption<?>, Object> getOptions() {
-        return getOptions(super.getOptions(), EpollChannelOption.DOMAIN_SOCKET_READ_MODE);
+        return getOptions(super.getOptions(), DOMAIN_SOCKET_READ_MODE, ALLOW_HALF_CLOSURE, SO_SNDBUF, SO_RCVBUF);
     }
 
     @SuppressWarnings("unchecked")
     @Override
     public <T> T getOption(ChannelOption<T> option) {
-        if (option == EpollChannelOption.DOMAIN_SOCKET_READ_MODE) {
+        if (option == DOMAIN_SOCKET_READ_MODE) {
             return (T) getReadMode();
+        }
+        if (option == ALLOW_HALF_CLOSURE) {
+            return (T) Boolean.valueOf(isAllowHalfClosure());
+        }
+        if (option == SO_SNDBUF) {
+            return (T) Integer.valueOf(getSendBufferSize());
+        }
+        if (option == SO_RCVBUF) {
+            return (T) Integer.valueOf(getReceiveBufferSize());
         }
         return super.getOption(option);
     }
@@ -53,8 +70,14 @@ public final class EpollDomainSocketChannelConfig extends EpollChannelConfig
     public <T> boolean setOption(ChannelOption<T> option, T value) {
         validate(option, value);
 
-        if (option == EpollChannelOption.DOMAIN_SOCKET_READ_MODE) {
+        if (option == DOMAIN_SOCKET_READ_MODE) {
             setReadMode((DomainSocketReadMode) value);
+        } else if (option == ALLOW_HALF_CLOSURE) {
+            setAllowHalfClosure((Boolean) value);
+        } else if (option == SO_SNDBUF) {
+            setSendBufferSize((Integer) value);
+        } else if (option == SO_RCVBUF) {
+            setReceiveBufferSize((Integer) value);
         } else {
             return super.setOption(option, value);
         }
@@ -132,12 +155,6 @@ public final class EpollDomainSocketChannelConfig extends EpollChannelConfig
     }
 
     @Override
-    public EpollDomainSocketChannelConfig setEpollMode(EpollMode mode) {
-        super.setEpollMode(mode);
-        return this;
-    }
-
-    @Override
     public EpollDomainSocketChannelConfig setReadMode(DomainSocketReadMode mode) {
         requireNonNull(mode, "mode");
         this.mode = mode;
@@ -147,5 +164,58 @@ public final class EpollDomainSocketChannelConfig extends EpollChannelConfig
     @Override
     public DomainSocketReadMode getReadMode() {
         return mode;
+    }
+
+    /**
+     * @see SocketChannelConfig#isAllowHalfClosure()
+     */
+    public boolean isAllowHalfClosure() {
+        return allowHalfClosure;
+    }
+
+    /**
+     * @see SocketChannelConfig#setAllowHalfClosure(boolean)
+     */
+    public EpollDomainSocketChannelConfig setAllowHalfClosure(boolean allowHalfClosure) {
+        this.allowHalfClosure = allowHalfClosure;
+        return this;
+    }
+
+    @Override
+    public int getSendBufferSize() {
+        try {
+            return ((EpollDomainSocketChannel) channel).socket.getSendBufferSize();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public EpollDomainSocketChannelConfig setSendBufferSize(int sendBufferSize) {
+        try {
+            ((EpollDomainSocketChannel) channel).socket.setSendBufferSize(sendBufferSize);
+            return this;
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public int getReceiveBufferSize() {
+        try {
+            return ((EpollDomainSocketChannel) channel).socket.getReceiveBufferSize();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public EpollDomainSocketChannelConfig setReceiveBufferSize(int receiveBufferSize) {
+        try {
+            ((EpollDomainSocketChannel) channel).socket.setReceiveBufferSize(receiveBufferSize);
+            return this;
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 }

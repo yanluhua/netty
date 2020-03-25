@@ -28,8 +28,9 @@ import io.netty.handler.codec.http.websocketx.ContinuationWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionDecoder;
+import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionFilter;
 
-import java.util.List;
+import java.util.Objects;
 
 /**
  * Deflate implementation of a payload decompressor for
@@ -37,18 +38,35 @@ import java.util.List;
  */
 abstract class DeflateDecoder extends WebSocketExtensionDecoder {
 
-    static final byte[] FRAME_TAIL = new byte[] {0x00, 0x00, (byte) 0xff, (byte) 0xff};
+    static final ByteBuf FRAME_TAIL = Unpooled.unreleasableBuffer(
+            Unpooled.wrappedBuffer(new byte[] {0x00, 0x00, (byte) 0xff, (byte) 0xff}))
+            .asReadOnly();
+
+    static final ByteBuf EMPTY_DEFLATE_BLOCK = Unpooled.unreleasableBuffer(
+            Unpooled.wrappedBuffer(new byte[] { 0x00 }))
+            .asReadOnly();
 
     private final boolean noContext;
+    private final WebSocketExtensionFilter extensionDecoderFilter;
 
     private EmbeddedChannel decoder;
 
     /**
      * Constructor
+     *
      * @param noContext true to disable context takeover.
+     * @param extensionDecoderFilter extension decoder filter.
      */
-    DeflateDecoder(boolean noContext) {
+    DeflateDecoder(boolean noContext, WebSocketExtensionFilter extensionDecoderFilter) {
         this.noContext = noContext;
+        this.extensionDecoderFilter = Objects.requireNonNull(extensionDecoderFilter, "extensionDecoderFilter");
+    }
+
+    /**
+     * Returns the extension decoder filter.
+     */
+    protected WebSocketExtensionFilter extensionDecoderFilter() {
+        return extensionDecoderFilter;
     }
 
     protected abstract boolean appendFrameTail(WebSocketFrame msg);
@@ -56,55 +74,21 @@ abstract class DeflateDecoder extends WebSocketExtensionDecoder {
     protected abstract int newRsv(WebSocketFrame msg);
 
     @Override
-    protected void decode(ChannelHandlerContext ctx, WebSocketFrame msg, List<Object> out) throws Exception {
-        if (decoder == null) {
-            if (!(msg instanceof TextWebSocketFrame) && !(msg instanceof BinaryWebSocketFrame)) {
-                throw new CodecException("unexpected initial frame type: " + msg.getClass().getName());
-            }
-            decoder = new EmbeddedChannel(ZlibCodecFactory.newZlibDecoder(ZlibWrapper.NONE));
-        }
+    protected void decode(ChannelHandlerContext ctx, WebSocketFrame msg) throws Exception {
+        final ByteBuf decompressedContent = decompressContent(ctx, msg);
 
-        boolean readable = msg.content().isReadable();
-        decoder.writeInbound(msg.content().retain());
-        if (appendFrameTail(msg)) {
-            decoder.writeInbound(Unpooled.wrappedBuffer(FRAME_TAIL));
-        }
-
-        CompositeByteBuf compositeUncompressedContent = ctx.alloc().compositeBuffer();
-        for (;;) {
-            ByteBuf partUncompressedContent = decoder.readInbound();
-            if (partUncompressedContent == null) {
-                break;
-            }
-            if (!partUncompressedContent.isReadable()) {
-                partUncompressedContent.release();
-                continue;
-            }
-            compositeUncompressedContent.addComponent(true, partUncompressedContent);
-        }
-        // Correctly handle empty frames
-        // See https://github.com/netty/netty/issues/4348
-        if (readable && compositeUncompressedContent.numComponents() <= 0) {
-            compositeUncompressedContent.release();
-            throw new CodecException("cannot read uncompressed buffer");
-        }
-
-        if (msg.isFinalFragment() && noContext) {
-            cleanup();
-        }
-
-        WebSocketFrame outMsg;
+        final WebSocketFrame outMsg;
         if (msg instanceof TextWebSocketFrame) {
-            outMsg = new TextWebSocketFrame(msg.isFinalFragment(), newRsv(msg), compositeUncompressedContent);
+            outMsg = new TextWebSocketFrame(msg.isFinalFragment(), newRsv(msg), decompressedContent);
         } else if (msg instanceof BinaryWebSocketFrame) {
-            outMsg = new BinaryWebSocketFrame(msg.isFinalFragment(), newRsv(msg), compositeUncompressedContent);
+            outMsg = new BinaryWebSocketFrame(msg.isFinalFragment(), newRsv(msg), decompressedContent);
         } else if (msg instanceof ContinuationWebSocketFrame) {
-            outMsg = new ContinuationWebSocketFrame(msg.isFinalFragment(), newRsv(msg),
-                    compositeUncompressedContent);
+            outMsg = new ContinuationWebSocketFrame(msg.isFinalFragment(), newRsv(msg), decompressedContent);
         } else {
             throw new CodecException("unexpected frame type: " + msg.getClass().getName());
         }
-        out.add(outMsg);
+
+        ctx.fireChannelRead(outMsg);
     }
 
     @Override
@@ -119,19 +103,56 @@ abstract class DeflateDecoder extends WebSocketExtensionDecoder {
         super.channelInactive(ctx);
     }
 
+    private ByteBuf decompressContent(ChannelHandlerContext ctx, WebSocketFrame msg) {
+        if (decoder == null) {
+            if (!(msg instanceof TextWebSocketFrame) && !(msg instanceof BinaryWebSocketFrame)) {
+                throw new CodecException("unexpected initial frame type: " + msg.getClass().getName());
+            }
+            decoder = new EmbeddedChannel(ZlibCodecFactory.newZlibDecoder(ZlibWrapper.NONE));
+        }
+
+        boolean readable = msg.content().isReadable();
+        boolean emptyDeflateBlock = EMPTY_DEFLATE_BLOCK.equals(msg.content());
+
+        decoder.writeInbound(msg.content().retain());
+        if (appendFrameTail(msg)) {
+            decoder.writeInbound(FRAME_TAIL.duplicate());
+        }
+
+        CompositeByteBuf compositeDecompressedContent = ctx.alloc().compositeBuffer();
+        for (;;) {
+            ByteBuf partUncompressedContent = decoder.readInbound();
+            if (partUncompressedContent == null) {
+                break;
+            }
+            if (!partUncompressedContent.isReadable()) {
+                partUncompressedContent.release();
+                continue;
+            }
+            compositeDecompressedContent.addComponent(true, partUncompressedContent);
+        }
+        // Correctly handle empty frames
+        // See https://github.com/netty/netty/issues/4348
+        if (!emptyDeflateBlock && readable && compositeDecompressedContent.numComponents() <= 0) {
+            // Sometimes after fragmentation the last frame
+            // May contain left-over data that doesn't affect decompression
+            if (!(msg instanceof ContinuationWebSocketFrame)) {
+                compositeDecompressedContent.release();
+                throw new CodecException("cannot read uncompressed buffer");
+            }
+        }
+
+        if (msg.isFinalFragment() && noContext) {
+            cleanup();
+        }
+
+        return compositeDecompressedContent;
+    }
+
     private void cleanup() {
         if (decoder != null) {
             // Clean-up the previous encoder if not cleaned up correctly.
-            if (decoder.finish()) {
-                for (;;) {
-                    ByteBuf buf = decoder.readOutbound();
-                    if (buf == null) {
-                        break;
-                    }
-                    // Release the buffer
-                    buf.release();
-                }
-            }
+            decoder.finishAndReleaseAll();
             decoder = null;
         }
     }

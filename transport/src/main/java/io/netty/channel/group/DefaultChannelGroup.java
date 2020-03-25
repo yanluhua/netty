@@ -45,7 +45,7 @@ public class DefaultChannelGroup extends AbstractSet<Channel> implements Channel
 
     private static final AtomicInteger nextId = new AtomicInteger();
     private final String name;
-    private final EventExecutor executor;
+    final EventExecutor executor;
     private final ConcurrentMap<ChannelId, Channel> serverChannels = new ConcurrentHashMap<>();
     private final ConcurrentMap<ChannelId, Channel> nonServerChannels = new ConcurrentHashMap<>();
     private final ChannelFutureListener remover = future -> remove(future.channel());
@@ -263,7 +263,7 @@ public class DefaultChannelGroup extends AbstractSet<Channel> implements Channel
             }
             future = voidFuture;
         } else {
-            Map<Channel, ChannelFuture> futures = new LinkedHashMap<>(size());
+            Map<Channel, ChannelFuture> futures = new LinkedHashMap<>(nonServerChannels.size());
             for (Channel c: nonServerChannels.values()) {
                 if (matcher.matches(c)) {
                     futures.put(c, c.write(safeDuplicate(message)));
@@ -396,7 +396,7 @@ public class DefaultChannelGroup extends AbstractSet<Channel> implements Channel
             }
             future = voidFuture;
         } else {
-            Map<Channel, ChannelFuture> futures = new LinkedHashMap<>(size());
+            Map<Channel, ChannelFuture> futures = new LinkedHashMap<>(nonServerChannels.size());
             for (Channel c: nonServerChannels.values()) {
                 if (matcher.matches(c)) {
                     futures.put(c, c.writeAndFlush(safeDuplicate(message)));

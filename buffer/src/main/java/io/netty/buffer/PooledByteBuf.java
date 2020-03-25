@@ -16,15 +16,19 @@
 
 package io.netty.buffer;
 
-import io.netty.util.Recycler;
-import io.netty.util.Recycler.Handle;
+import io.netty.util.internal.ObjectPool.Handle;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.channels.ClosedChannelException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.GatheringByteChannel;
+import java.nio.channels.ScatteringByteChannel;
 
 abstract class PooledByteBuf<T> extends AbstractReferenceCountedByteBuf {
 
-    private final Recycler.Handle<PooledByteBuf<T>> recyclerHandle;
+    private final Handle<PooledByteBuf<T>> recyclerHandle;
 
     protected PoolChunk<T> chunk;
     protected long handle;
@@ -37,7 +41,7 @@ abstract class PooledByteBuf<T> extends AbstractReferenceCountedByteBuf {
     private ByteBufAllocator allocator;
 
     @SuppressWarnings("unchecked")
-    protected PooledByteBuf(Recycler.Handle<? extends PooledByteBuf<T>> recyclerHandle, int maxCapacity) {
+    protected PooledByteBuf(Handle<? extends PooledByteBuf<T>> recyclerHandle, int maxCapacity) {
         super(maxCapacity);
         this.recyclerHandle = (Handle<PooledByteBuf<T>>) recyclerHandle;
     }
@@ -72,7 +76,7 @@ abstract class PooledByteBuf<T> extends AbstractReferenceCountedByteBuf {
      */
     final void reuse(int maxCapacity) {
         maxCapacity(maxCapacity);
-        setRefCnt(1);
+        resetRefCnt();
         setIndex0(0, 0);
     }
 
@@ -82,35 +86,29 @@ abstract class PooledByteBuf<T> extends AbstractReferenceCountedByteBuf {
     }
 
     @Override
-    public final ByteBuf capacity(int newCapacity) {
-        checkNewCapacity(newCapacity);
+    public int maxFastWritableBytes() {
+        return Math.min(maxLength, maxCapacity()) - writerIndex;
+    }
 
-        // If the request capacity does not require reallocation, just update the length of the memory.
-        if (chunk.unpooled) {
-            if (newCapacity == length) {
-                return this;
-            }
-        } else {
+    @Override
+    public final ByteBuf capacity(int newCapacity) {
+        if (newCapacity == length) {
+            ensureAccessible();
+            return this;
+        }
+        checkNewCapacity(newCapacity);
+        if (!chunk.unpooled) {
+            // If the request capacity does not require reallocation, just update the length of the memory.
             if (newCapacity > length) {
                 if (newCapacity <= maxLength) {
                     length = newCapacity;
                     return this;
                 }
-            } else if (newCapacity < length) {
-                if (newCapacity > maxLength >>> 1) {
-                    if (maxLength <= 512) {
-                        if (newCapacity > maxLength - 16) {
-                            length = newCapacity;
-                            setIndex(Math.min(readerIndex(), newCapacity), Math.min(writerIndex(), newCapacity));
-                            return this;
-                        }
-                    } else { // > 512 (i.e. >= 1024)
-                        length = newCapacity;
-                        setIndex(Math.min(readerIndex(), newCapacity), Math.min(writerIndex(), newCapacity));
-                        return this;
-                    }
-                }
-            } else {
+            } else if (newCapacity > maxLength >>> 1 &&
+                    (maxLength > 512 || newCapacity > maxLength - 16)) {
+                // here newCapacity < length
+                length = newCapacity;
+                trimIndicesToCapacity(newCapacity);
                 return this;
             }
         }
@@ -155,6 +153,8 @@ abstract class PooledByteBuf<T> extends AbstractReferenceCountedByteBuf {
         ByteBuffer tmpNioBuf = this.tmpNioBuf;
         if (tmpNioBuf == null) {
             this.tmpNioBuf = tmpNioBuf = newInternalNioBuffer(memory);
+        } else {
+            tmpNioBuf.clear();
         }
         return tmpNioBuf;
     }
@@ -180,5 +180,87 @@ abstract class PooledByteBuf<T> extends AbstractReferenceCountedByteBuf {
 
     protected final int idx(int index) {
         return offset + index;
+    }
+
+    final ByteBuffer _internalNioBuffer(int index, int length, boolean duplicate) {
+        index = idx(index);
+        ByteBuffer buffer = duplicate ? newInternalNioBuffer(memory) : internalNioBuffer();
+        buffer.limit(index + length).position(index);
+        return buffer;
+    }
+
+    ByteBuffer duplicateInternalNioBuffer(int index, int length) {
+        checkIndex(index, length);
+        return _internalNioBuffer(index, length, true);
+    }
+
+    @Override
+    public final ByteBuffer internalNioBuffer(int index, int length) {
+        checkIndex(index, length);
+        return _internalNioBuffer(index, length, false);
+    }
+
+    @Override
+    public final int nioBufferCount() {
+        return 1;
+    }
+
+    @Override
+    public final ByteBuffer nioBuffer(int index, int length) {
+        return duplicateInternalNioBuffer(index, length).slice();
+    }
+
+    @Override
+    public final ByteBuffer[] nioBuffers(int index, int length) {
+        return new ByteBuffer[] { nioBuffer(index, length) };
+    }
+
+    @Override
+    public final boolean isContiguous() {
+        return true;
+    }
+
+    @Override
+    public final int getBytes(int index, GatheringByteChannel out, int length) throws IOException {
+        return out.write(duplicateInternalNioBuffer(index, length));
+    }
+
+    @Override
+    public final int readBytes(GatheringByteChannel out, int length) throws IOException {
+        checkReadableBytes(length);
+        int readBytes = out.write(_internalNioBuffer(readerIndex, length, false));
+        readerIndex += readBytes;
+        return readBytes;
+    }
+
+    @Override
+    public final int getBytes(int index, FileChannel out, long position, int length) throws IOException {
+        return out.write(duplicateInternalNioBuffer(index, length), position);
+    }
+
+    @Override
+    public final int readBytes(FileChannel out, long position, int length) throws IOException {
+        checkReadableBytes(length);
+        int readBytes = out.write(_internalNioBuffer(readerIndex, length, false), position);
+        readerIndex += readBytes;
+        return readBytes;
+    }
+
+    @Override
+    public final int setBytes(int index, ScatteringByteChannel in, int length) throws IOException {
+        try {
+            return in.read(internalNioBuffer(index, length));
+        } catch (ClosedChannelException ignored) {
+            return -1;
+        }
+    }
+
+    @Override
+    public final int setBytes(int index, FileChannel in, long position, int length) throws IOException {
+        try {
+            return in.read(internalNioBuffer(index, length), position);
+        } catch (ClosedChannelException ignored) {
+            return -1;
+        }
     }
 }

@@ -19,8 +19,8 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.WriteBufferWaterMark;
@@ -113,13 +113,13 @@ public class SocketShutdownOutputBySelfTest extends AbstractClientSocketTest {
                 ch.shutdownInput().syncUninterruptibly();
                 fail();
             } catch (Throwable cause) {
-                checkThrowable(cause);
+                checkThrowable(cause.getCause());
             }
             try {
                 ch.shutdownOutput().syncUninterruptibly();
                 fail();
             } catch (Throwable cause) {
-                checkThrowable(cause);
+                checkThrowable(cause.getCause());
             }
         } finally {
             if (s != null) {
@@ -177,7 +177,7 @@ public class SocketShutdownOutputBySelfTest extends AbstractClientSocketTest {
                 ch.writeAndFlush(Unpooled.wrappedBuffer(new byte[]{ 2 })).sync();
                 fail();
             } catch (Throwable cause) {
-                checkThrowable(cause);
+                checkThrowable(cause.getCause());
             }
             assertNull(h.writabilityQueue.poll());
         } finally {
@@ -216,7 +216,7 @@ public class SocketShutdownOutputBySelfTest extends AbstractClientSocketTest {
         ChannelFuture cf = null;
         try {
             ss.bind(newSocketAddress());
-            cf = cb.option(ChannelOption.SO_LINGER, 1).handler(new ChannelInboundHandlerAdapter())
+            cf = cb.option(ChannelOption.SO_LINGER, 1).handler(new ChannelHandler() { })
                     .connect(ss.getLocalSocketAddress()).sync();
             s = ss.accept();
 
@@ -260,7 +260,7 @@ public class SocketShutdownOutputBySelfTest extends AbstractClientSocketTest {
         }
 
         @Override
-        public void channelRead0(ChannelHandlerContext ctx, ByteBuf msg) throws Exception {
+        public void messageReceived(ChannelHandlerContext ctx, ByteBuf msg) throws Exception {
             queue.offer(msg.readByte());
         }
 

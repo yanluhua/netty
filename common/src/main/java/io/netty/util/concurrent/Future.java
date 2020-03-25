@@ -16,8 +16,9 @@
 package io.netty.util.concurrent;
 
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-
+import java.util.concurrent.TimeoutException;
 
 /**
  * The result of an asynchronous operation.
@@ -83,12 +84,20 @@ public interface Future<V> extends java.util.concurrent.Future<V> {
     /**
      * Waits for this future until it is done, and rethrows the cause of the failure if this future
      * failed.
+     *
+     * @throws CancellationException if the computation was cancelled
+     * @throws {@link java.util.concurrent.CompletionException} if the computation threw an exception.
+     * @throws InterruptedException if the current thread was interrupted while waiting
+     *
      */
     Future<V> sync() throws InterruptedException;
 
     /**
      * Waits for this future until it is done, and rethrows the cause of the failure if this future
      * failed.
+     *
+     * @throws CancellationException if the computation was cancelled
+     * @throws {@link java.util.concurrent.CompletionException} if the computation threw an exception.
      */
     Future<V> syncUninterruptibly();
 
@@ -155,15 +164,57 @@ public interface Future<V> extends java.util.concurrent.Future<V> {
      * Return the result without blocking. If the future is not done yet this will return {@code null}.
      *
      * As it is possible that a {@code null} value is used to mark the future as successful you also need to check
-     * if the future is really done with {@link #isDone()} and not relay on the returned {@code null} value.
+     * if the future is really done with {@link #isDone()} and not rely on the returned {@code null} value.
      */
     V getNow();
 
     /**
      * {@inheritDoc}
      *
-     * If the cancellation was successful it will fail the future with an {@link CancellationException}.
+     * If the cancellation was successful it will fail the future with a {@link CancellationException}.
      */
     @Override
     boolean cancel(boolean mayInterruptIfRunning);
+
+    /**
+     * Returns the {@link EventExecutor} that is tied to this {@link Future}.
+     */
+    EventExecutor executor();
+
+    @Override
+    default V get() throws InterruptedException, ExecutionException {
+        await();
+
+        Throwable cause = cause();
+        if (cause == null) {
+            return getNow();
+        }
+        if (cause instanceof CancellationException) {
+            throw (CancellationException) cause;
+        }
+        throw new ExecutionException(cause);
+    }
+
+    @Override
+    default V get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+        if (await(timeout, unit)) {
+            Throwable cause = cause();
+            if (cause == null) {
+                return getNow();
+            }
+            if (cause instanceof CancellationException) {
+                throw (CancellationException) cause;
+            }
+            throw new ExecutionException(cause);
+        }
+        throw new TimeoutException();
+    }
+
+    /**
+     * Returns a {@link FutureCompletionStage} that reflects the state of this {@link Future} and so will receive
+     * all updates as well.
+     */
+    default FutureCompletionStage<V> asStage() {
+        return new DefaultFutureCompletionStage<>(this);
+    }
 }

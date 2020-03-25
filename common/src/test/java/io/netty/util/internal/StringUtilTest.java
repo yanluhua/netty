@@ -18,9 +18,13 @@ package io.netty.util.internal;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
 
 import static io.netty.util.internal.StringUtil.NEWLINE;
 import static io.netty.util.internal.StringUtil.commonSuffixOfLength;
+import static io.netty.util.internal.StringUtil.indexOfWhiteSpace;
+import static io.netty.util.internal.StringUtil.indexOfNonWhiteSpace;
+import static io.netty.util.internal.StringUtil.isNullOrEmpty;
 import static io.netty.util.internal.StringUtil.simpleClassName;
 import static io.netty.util.internal.StringUtil.substringAfter;
 import static io.netty.util.internal.StringUtil.toHexString;
@@ -446,15 +450,15 @@ public class StringUtilTest {
 
     @Test
     public void testUnescapeCsvFields() {
-        assertEquals(Arrays.asList(""), unescapeCsvFields(""));
+        assertEquals(Collections.singletonList(""), unescapeCsvFields(""));
         assertEquals(Arrays.asList("", ""), unescapeCsvFields(","));
         assertEquals(Arrays.asList("a", ""), unescapeCsvFields("a,"));
         assertEquals(Arrays.asList("", "a"), unescapeCsvFields(",a"));
-        assertEquals(Arrays.asList("\""), unescapeCsvFields("\"\"\"\""));
+        assertEquals(Collections.singletonList("\""), unescapeCsvFields("\"\"\"\""));
         assertEquals(Arrays.asList("\"", "\""), unescapeCsvFields("\"\"\"\",\"\"\"\""));
-        assertEquals(Arrays.asList("netty"), unescapeCsvFields("netty"));
+        assertEquals(Collections.singletonList("netty"), unescapeCsvFields("netty"));
         assertEquals(Arrays.asList("hello", "netty"), unescapeCsvFields("hello,netty"));
-        assertEquals(Arrays.asList("hello,netty"), unescapeCsvFields("\"hello,netty\""));
+        assertEquals(Collections.singletonList("hello,netty"), unescapeCsvFields("\"hello,netty\""));
         assertEquals(Arrays.asList("hello", "netty"), unescapeCsvFields("\"hello\",\"netty\""));
         assertEquals(Arrays.asList("a\"b", "c\"d"), unescapeCsvFields("\"a\"\"b\",\"c\"\"d\""));
         assertEquals(Arrays.asList("a\rb", "c\nd"), unescapeCsvFields("\"a\rb\",\"c\nd\""));
@@ -532,5 +536,59 @@ public class StringUtilTest {
         assertSame("a\t b", StringUtil.trimOws("a\t b"));
         assertEquals("", StringUtil.trimOws("\t ").toString());
         assertEquals("a b", StringUtil.trimOws("\ta b \t").toString());
+    }
+
+    @Test
+    public void testJoin() {
+        assertEquals("",
+                     StringUtil.join(",", Collections.<CharSequence>emptyList()).toString());
+        assertEquals("a",
+                     StringUtil.join(",", Collections.singletonList("a")).toString());
+        assertEquals("a,b",
+                     StringUtil.join(",", Arrays.asList("a", "b")).toString());
+        assertEquals("a,b,c",
+                     StringUtil.join(",", Arrays.asList("a", "b", "c")).toString());
+        assertEquals("a,b,c,null,d",
+                     StringUtil.join(",", Arrays.asList("a", "b", "c", null, "d")).toString());
+    }
+
+    @Test
+    public void testIsNullOrEmpty() {
+        assertTrue(isNullOrEmpty(null));
+        assertTrue(isNullOrEmpty(""));
+        assertTrue(isNullOrEmpty(StringUtil.EMPTY_STRING));
+        assertFalse(isNullOrEmpty(" "));
+        assertFalse(isNullOrEmpty("\t"));
+        assertFalse(isNullOrEmpty("\n"));
+        assertFalse(isNullOrEmpty("foo"));
+        assertFalse(isNullOrEmpty(NEWLINE));
+    }
+
+    @Test
+    public void testIndexOfWhiteSpace() {
+        assertEquals(-1, indexOfWhiteSpace("", 0));
+        assertEquals(0, indexOfWhiteSpace(" ", 0));
+        assertEquals(-1, indexOfWhiteSpace(" ", 1));
+        assertEquals(0, indexOfWhiteSpace("\n", 0));
+        assertEquals(-1, indexOfWhiteSpace("\n", 1));
+        assertEquals(0, indexOfWhiteSpace("\t", 0));
+        assertEquals(-1, indexOfWhiteSpace("\t", 1));
+        assertEquals(3, indexOfWhiteSpace("foo\r\nbar", 1));
+        assertEquals(-1, indexOfWhiteSpace("foo\r\nbar", 10));
+        assertEquals(7, indexOfWhiteSpace("foo\tbar\r\n", 6));
+        assertEquals(-1, indexOfWhiteSpace("foo\tbar\r\n", Integer.MAX_VALUE));
+    }
+
+    @Test
+    public void testIndexOfNonWhiteSpace() {
+        assertEquals(-1, indexOfNonWhiteSpace("", 0));
+        assertEquals(-1, indexOfNonWhiteSpace(" ", 0));
+        assertEquals(-1, indexOfNonWhiteSpace(" \t", 0));
+        assertEquals(-1, indexOfNonWhiteSpace(" \t\r\n", 0));
+        assertEquals(2, indexOfNonWhiteSpace(" \tfoo\r\n", 0));
+        assertEquals(2, indexOfNonWhiteSpace(" \tfoo\r\n", 1));
+        assertEquals(4, indexOfNonWhiteSpace(" \tfoo\r\n", 4));
+        assertEquals(-1, indexOfNonWhiteSpace(" \tfoo\r\n", 10));
+        assertEquals(-1, indexOfNonWhiteSpace(" \tfoo\r\n", Integer.MAX_VALUE));
     }
 }

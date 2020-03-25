@@ -36,7 +36,8 @@ import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.IOException;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicInteger;
+
 
 import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 import static java.lang.Math.min;
@@ -47,8 +48,6 @@ import static java.util.Objects.requireNonNull;
  */
 public class EpollHandler implements IoHandler {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(EpollHandler.class);
-    private static final AtomicIntegerFieldUpdater<EpollHandler> WAKEN_UP_UPDATER =
-            AtomicIntegerFieldUpdater.newUpdater(EpollHandler.class, "wakenUp");
 
     static {
         // Ensure JNI is initialized by the time this class is loaded by this time!
@@ -61,7 +60,7 @@ public class EpollHandler implements IoHandler {
     private final FileDescriptor epollFd;
     private final FileDescriptor eventFd;
     private final FileDescriptor timerFd;
-    private final IntObjectMap<AbstractEpollChannel> channels = new IntObjectHashMap<AbstractEpollChannel>(4096);
+    private final IntObjectMap<AbstractEpollChannel> channels = new IntObjectHashMap<>(4096);
     private final boolean allowGrowing;
     private final EpollEventArray events;
 
@@ -71,8 +70,8 @@ public class EpollHandler implements IoHandler {
 
     private final SelectStrategy selectStrategy;
     private final IntSupplier selectNowSupplier = this::epollWaitNow;
-    @SuppressWarnings("unused") // AtomicIntegerFieldUpdater
-    private volatile int wakenUp;
+    private final AtomicInteger wakenUp = new AtomicInteger(1);
+    private boolean pendingWakeup;
 
     // See http://man7.org/linux/man-pages/man2/timerfd_create.2.html.
     private static final long MAX_SCHEDULED_TIMERFD_NS = 999999999;
@@ -106,12 +105,16 @@ public class EpollHandler implements IoHandler {
             this.epollFd = epollFd = Native.newEpollCreate();
             this.eventFd = eventFd = Native.newEventFd();
             try {
-                Native.epollCtlAdd(epollFd.intValue(), eventFd.intValue(), Native.EPOLLIN);
+                // It is important to use EPOLLET here as we only want to get the notification once per
+                // wakeup and don't call eventfd_read(...).
+                Native.epollCtlAdd(epollFd.intValue(), eventFd.intValue(), Native.EPOLLIN | Native.EPOLLET);
             } catch (IOException e) {
                 throw new IllegalStateException("Unable to add eventFd filedescriptor to epoll", e);
             }
             this.timerFd = timerFd = Native.newTimerFd();
             try {
+                // It is important to use EPOLLET here as we only want to get the notification once per
+                // wakeup and don't call read(...).
                 Native.epollCtlAdd(epollFd.intValue(), timerFd.intValue(), Native.EPOLLIN | Native.EPOLLET);
             } catch (IOException e) {
                 throw new IllegalStateException("Unable to add timerFd filedescriptor to epoll", e);
@@ -213,7 +216,7 @@ public class EpollHandler implements IoHandler {
 
     @Override
     public final void wakeup(boolean inEventLoop) {
-        if (!inEventLoop && WAKEN_UP_UPDATER.compareAndSet(this, 0, 1)) {
+        if (!inEventLoop && wakenUp.getAndSet(1) == 0) {
             // write to the evfd which will then wake-up epoll_wait(...)
             Native.eventFdWrite(eventFd.intValue(), 1L);
         }
@@ -225,7 +228,11 @@ public class EpollHandler implements IoHandler {
     private void add(AbstractEpollChannel ch) throws IOException {
         int fd = ch.socket.intValue();
         Native.epollCtlAdd(epollFd.intValue(), fd, ch.flags);
-        channels.put(fd, ch);
+        AbstractEpollChannel old = channels.put(fd, ch);
+
+        // We either expect to have no Channel in the map with the same FD or that the FD of the old Channel is already
+        // closed.
+        assert old == null || !old.isOpen();
     }
 
     /**
@@ -239,25 +246,23 @@ public class EpollHandler implements IoHandler {
      * Deregister the given channel from this {@link EpollHandler}.
      */
     private void remove(AbstractEpollChannel ch) throws IOException {
-        if (ch.isOpen()) {
-            int fd = ch.socket.intValue();
-            if (channels.remove(fd) != null) {
-                // Remove the epoll. This is only needed if it's still open as otherwise it will be automatically
-                // removed once the file-descriptor is closed.
-                Native.epollCtlDel(epollFd.intValue(), ch.fd().intValue());
-            }
+        int fd = ch.socket.intValue();
+
+        AbstractEpollChannel old = channels.remove(fd);
+        if (old != null && old != ch) {
+            // The Channel mapping was already replaced due FD reuse, put back the stored Channel.
+            channels.put(fd, old);
+
+            // If we found another Channel in the map that is mapped to the same FD the given Channel MUST be closed.
+            assert !ch.isOpen();
+        } else if (ch.isOpen()) {
+            // Remove the epoll. This is only needed if it's still open as otherwise it will be automatically
+            // removed once the file-descriptor is closed.
+            Native.epollCtlDel(epollFd.intValue(), fd);
         }
     }
 
-    private int epollWait(IoExecutionContext context, boolean oldWakeup) throws IOException {
-        // If a task was submitted when wakenUp value was 1, the task didn't get a chance to produce wakeup event.
-        // So we need to check task queue again before calling epoll_wait. If we don't, the task might be pended
-        // until epoll_wait was timed out. It might be pended until idle timeout if IdleStateHandler existed
-        // in pipeline.
-        if (oldWakeup && !context.canBlock()) {
-            return epollWaitNow();
-        }
-
+    private int epollWait(IoExecutionContext context) throws IOException {
         int delaySeconds;
         int delayNanos;
         long curDeadlineNanos = context.deadlineNanos();
@@ -274,11 +279,16 @@ public class EpollHandler implements IoHandler {
     }
 
     private int epollWaitNow() throws IOException {
-        return Native.epollWait(epollFd, events, timerFd, 0, 0);
+        return Native.epollWait(epollFd, events, true);
     }
 
     private int epollBusyWait() throws IOException {
         return Native.epollBusyWait(epollFd, events);
+    }
+
+    private int epollWaitTimeboxed() throws IOException {
+        // Wait with 1 second "safeguard" timeout
+        return Native.epollWait(epollFd, events, 1000);
     }
 
     @Override
@@ -295,40 +305,36 @@ public class EpollHandler implements IoHandler {
                     break;
 
                 case SelectStrategy.SELECT:
-                    strategy = epollWait(context, WAKEN_UP_UPDATER.getAndSet(this, 0) == 1);
-
-                    // 'wakenUp.compareAndSet(false, true)' is always evaluated
-                    // before calling 'selector.wakeup()' to reduce the wake-up
-                    // overhead. (Selector.wakeup() is an expensive operation.)
-                    //
-                    // However, there is a race condition in this approach.
-                    // The race condition is triggered when 'wakenUp' is set to
-                    // true too early.
-                    //
-                    // 'wakenUp' is set to true too early if:
-                    // 1) Selector is waken up between 'wakenUp.set(false)' and
-                    //    'selector.select(...)'. (BAD)
-                    // 2) Selector is waken up between 'selector.select(...)' and
-                    //    'if (wakenUp.get()) { ... }'. (OK)
-                    //
-                    // In the first case, 'wakenUp' is set to true and the
-                    // following 'selector.select(...)' will wake up immediately.
-                    // Until 'wakenUp' is set to false again in the next round,
-                    // 'wakenUp.compareAndSet(false, true)' will fail, and therefore
-                    // any attempt to wake up the Selector will fail, too, causing
-                    // the following 'selector.select(...)' call to block
-                    // unnecessarily.
-                    //
-                    // To fix this problem, we wake up the selector again if wakenUp
-                    // is true immediately after selector.select(...).
-                    // It is inefficient in that it wakes up the selector for both
-                    // the first case (BAD - wake-up required) and the second case
-                    // (OK - no wake-up required).
-
-                    if (wakenUp == 1) {
-                        Native.eventFdWrite(eventFd.intValue(), 1L);
+                    if (pendingWakeup) {
+                        // We are going to be immediately woken so no need to reset wakenUp
+                        // or check for timerfd adjustment.
+                        strategy = epollWaitTimeboxed();
+                        if (strategy != 0) {
+                            break;
+                        }
+                        // We timed out so assume that we missed the write event due to an
+                        // abnormally failed syscall (the write itself or a prior epoll_wait)
+                        logger.warn("Missed eventfd write (not seen after > 1 second)");
+                        pendingWakeup = false;
+                        if (!context.canBlock()) {
+                            break;
+                        }
+                        // fall-through
                     }
-                    // fallthrough
+
+                    wakenUp.set(0);
+                    try {
+                        if (context.canBlock()) {
+                            strategy = epollWait(context);
+                        }
+                    } finally {
+                        // Try get() first to avoid much more expensive CAS in the case we
+                        // were woken via the wakeup() method (submitted task)
+                        if (wakenUp.get() == 1 || wakenUp.getAndSet(1) == 1) {
+                            pendingWakeup = true;
+                        }
+                    }
+                    // fall-through
                 default:
             }
             if (strategy > 0) {
@@ -362,16 +368,11 @@ public class EpollHandler implements IoHandler {
 
     @Override
     public void prepareToDestroy() {
-        try {
-            epollWaitNow();
-        } catch (IOException ignore) {
-            // ignore on close
-        }
         // Using the intermediate collection to prevent ConcurrentModificationException.
         // In the `close()` method, the channel is deleted from `channels` map.
         AbstractEpollChannel[] localChannels = channels.values().toArray(new AbstractEpollChannel[0]);
 
-        for (AbstractEpollChannel ch : localChannels) {
+        for (AbstractEpollChannel ch: localChannels) {
             ch.unsafe().close(ch.unsafe().voidPromise());
         }
     }
@@ -380,11 +381,11 @@ public class EpollHandler implements IoHandler {
         for (int i = 0; i < ready; i ++) {
             final int fd = events.fd(i);
             if (fd == eventFd.intValue()) {
-                // consume wakeup event.
-                Native.eventFdRead(fd);
+                pendingWakeup = false;
             } else if (fd == timerFd.intValue()) {
-                // consume wakeup event, necessary because the timer is added with ET mode.
-                Native.timerFdRead(fd);
+                // Just ignore as we use ET mode for the eventfd and timerfd.
+                //
+                // See also https://stackoverflow.com/a/12492308/1074097
             } else {
                 final long ev = events.events(i);
 
@@ -443,10 +444,23 @@ public class EpollHandler implements IoHandler {
     @Override
     public final void destroy() {
         try {
-            try {
-                epollFd.close();
-            } catch (IOException e) {
-                logger.warn("Failed to close the epoll fd.", e);
+            // Ensure any in-flight wakeup writes have been performed prior to closing eventFd.
+            while (pendingWakeup) {
+                try {
+                    int count = epollWaitTimeboxed();
+                    if (count == 0) {
+                        // We timed-out so assume that the write we're expecting isn't coming
+                        break;
+                    }
+                    for (int i = 0; i < count; i++) {
+                        if (events.fd(i) == eventFd.intValue()) {
+                            pendingWakeup = false;
+                            break;
+                        }
+                    }
+                } catch (IOException ignore) {
+                    // ignore
+                }
             }
             try {
                 eventFd.close();
@@ -457,6 +471,11 @@ public class EpollHandler implements IoHandler {
                 timerFd.close();
             } catch (IOException e) {
                 logger.warn("Failed to close the timer fd.", e);
+            }
+            try {
+                epollFd.close();
+            } catch (IOException e) {
+                logger.warn("Failed to close the epoll fd.", e);
             }
         } finally {
             // release native memory

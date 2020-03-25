@@ -26,6 +26,7 @@ import io.netty.handler.codec.http.multipart.HttpPostRequestDecoder.EndOfDataDec
 import io.netty.handler.codec.http.multipart.HttpPostRequestDecoder.ErrorDataDecoderException;
 import io.netty.handler.codec.http.multipart.HttpPostRequestDecoder.MultiPartStatus;
 import io.netty.handler.codec.http.multipart.HttpPostRequestDecoder.NotEnoughDataDecoderException;
+import io.netty.util.internal.PlatformDependent;
 
 import java.io.IOException;
 import java.nio.charset.Charset;
@@ -149,13 +150,18 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
         this.request = requireNonNull(request, "request");
         this.charset = requireNonNull(charset, "charset");
         this.factory = requireNonNull(factory, "factory");
-        if (request instanceof HttpContent) {
-            // Offer automatically if the given request is als type of HttpContent
-            // See #1089
-            offer((HttpContent) request);
-        } else {
-            undecodedChunk = buffer();
-            parseBody();
+        try {
+            if (request instanceof HttpContent) {
+                // Offer automatically if the given request is als type of HttpContent
+                // See #1089
+                offer((HttpContent) request);
+            } else {
+                undecodedChunk = buffer();
+                parseBody();
+            }
+        } catch (Throwable e) {
+            destroy();
+            PlatformDependent.throwException(e);
         }
     }
 
@@ -479,6 +485,10 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
             undecodedChunk.readerIndex(firstpos);
             throw e;
         } catch (IOException e) {
+            // error while decoding
+            undecodedChunk.readerIndex(firstpos);
+            throw new ErrorDataDecoderException(e);
+        } catch (IllegalArgumentException e) {
             // error while decoding
             undecodedChunk.readerIndex(firstpos);
             throw new ErrorDataDecoderException(e);

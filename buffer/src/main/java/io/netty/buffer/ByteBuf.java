@@ -236,7 +236,6 @@ import java.nio.charset.UnsupportedCharsetException;
  * Please refer to {@link ByteBufInputStream} and
  * {@link ByteBufOutputStream}.
  */
-@SuppressWarnings("ClassMayBeInterface")
 public abstract class ByteBuf implements ReferenceCounted, Comparable<ByteBuf> {
 
     /**
@@ -412,6 +411,15 @@ public abstract class ByteBuf implements ReferenceCounted, Comparable<ByteBuf> {
      * {@code (this.maxCapacity - this.writerIndex)}.
      */
     public abstract int maxWritableBytes();
+
+    /**
+     * Returns the maximum number of bytes which can be written for certain without involving
+     * an internal reallocation or data-copy. The returned value will be &ge; {@link #writableBytes()}
+     * and &le; {@link #maxWritableBytes()}.
+     */
+    public int maxFastWritableBytes() {
+        return writableBytes();
+    }
 
     /**
      * Returns {@code true}
@@ -2007,11 +2015,14 @@ public abstract class ByteBuf implements ReferenceCounted, Comparable<ByteBuf> {
 
     /**
      * Locates the first occurrence of the specified {@code value} in this
-     * buffer.  The search takes place from the specified {@code fromIndex}
-     * (inclusive)  to the specified {@code toIndex} (exclusive).
+     * buffer. The search takes place from the specified {@code fromIndex}
+     * (inclusive) to the specified {@code toIndex} (exclusive).
      * <p>
      * If {@code fromIndex} is greater than {@code toIndex}, the search is
-     * performed in a reversed order.
+     * performed in a reversed order from {@code fromIndex} (exclusive)
+     * down to {@code toIndex} (inclusive).
+     * <p>
+     * Note that the lower index is always included and higher always excluded.
      * <p>
      * This method does not modify {@code readerIndex} or {@code writerIndex} of
      * this buffer.
@@ -2326,6 +2337,19 @@ public abstract class ByteBuf implements ReferenceCounted, Comparable<ByteBuf> {
      *         if this buffer does not support accessing the low-level memory address
      */
     public abstract long memoryAddress();
+
+    /**
+     * Returns {@code true} if this {@link ByteBuf} implementation is backed by a single memory region.
+     * Composite buffer implementations must return false even if they currently hold &le; 1 components.
+     * For buffers that return {@code true}, it's guaranteed that a successful call to {@link #discardReadBytes()}
+     * will increase the value of {@link #maxFastWritableBytes()} by the current {@code readerIndex}.
+     * <p>
+     * This method will return {@code false} by default, and a {@code false} return value does not necessarily
+     * mean that the implementation is composite or that it is <i>not</i> backed by a single memory region.
+     */
+    public boolean isContiguous() {
+        return false;
+    }
 
     /**
      * Decodes this buffer's readable bytes into a string with the specified

@@ -266,10 +266,8 @@ public class HashedWheelTimer implements Timer {
         }
 
         if (duration < MILLISECOND_NANOS) {
-            if (logger.isWarnEnabled()) {
-                logger.warn("Configured tickDuration %d smaller then %d, using 1ms.",
-                            tickDuration, MILLISECOND_NANOS);
-            }
+            logger.warn("Configured tickDuration {} smaller then {}, using 1ms.",
+                        tickDuration, MILLISECOND_NANOS);
             this.tickDuration = MILLISECOND_NANOS;
         } else {
             this.tickDuration = duration;
@@ -565,6 +563,9 @@ public class HashedWheelTimer implements Timer {
                 // See https://github.com/netty/netty/issues/356
                 if (PlatformDependent.isWindows()) {
                     sleepTimeMs = sleepTimeMs / 10 * 10;
+                    if (sleepTimeMs == 0) {
+                        sleepTimeMs = 1;
+                    }
                 }
 
                 try {

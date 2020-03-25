@@ -18,8 +18,8 @@ package io.netty.handler.ssl;
 import static java.util.Objects.requireNonNull;
 
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.util.internal.logging.InternalLogger;
@@ -60,7 +60,7 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
  * }
  * </pre>
  */
-public abstract class ApplicationProtocolNegotiationHandler extends ChannelInboundHandlerAdapter {
+public abstract class ApplicationProtocolNegotiationHandler implements ChannelHandler {
 
     private static final InternalLogger logger =
             InternalLoggerFactory.getInstance(ApplicationProtocolNegotiationHandler.class);
@@ -80,23 +80,33 @@ public abstract class ApplicationProtocolNegotiationHandler extends ChannelInbou
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
         if (evt instanceof SslHandshakeCompletionEvent) {
-            ctx.pipeline().remove(this);
 
-            SslHandshakeCompletionEvent handshakeEvent = (SslHandshakeCompletionEvent) evt;
-            if (handshakeEvent.isSuccess()) {
-                SslHandler sslHandler = ctx.pipeline().get(SslHandler.class);
-                if (sslHandler == null) {
-                    throw new IllegalStateException("cannot find a SslHandler in the pipeline (required for " +
-                                                    "application-level protocol negotiation)");
+            try {
+                SslHandshakeCompletionEvent handshakeEvent = (SslHandshakeCompletionEvent) evt;
+                if (handshakeEvent.isSuccess()) {
+                    SslHandler sslHandler = ctx.pipeline().get(SslHandler.class);
+                    if (sslHandler == null) {
+                        throw new IllegalStateException("cannot find an SslHandler in the pipeline (required for "
+                                + "application-level protocol negotiation)");
+                    }
+                    String protocol = sslHandler.applicationProtocol();
+                    configurePipeline(ctx, protocol != null ? protocol : fallbackProtocol);
+                } else {
+                    handshakeFailure(ctx, handshakeEvent.cause());
                 }
-                String protocol = sslHandler.applicationProtocol();
-                configurePipeline(ctx, protocol != null? protocol : fallbackProtocol);
-            } else {
-                handshakeFailure(ctx, handshakeEvent.cause());
-            }
-        }
+            } catch (Throwable cause) {
+                exceptionCaught(ctx, cause);
+            } finally {
+                ctx.fireUserEventTriggered(evt);
 
-        ctx.fireUserEventTriggered(evt);
+                ChannelPipeline pipeline = ctx.pipeline();
+                if (pipeline.context(this) != null) {
+                    pipeline.remove(this);
+                }
+            }
+        } else {
+            ctx.fireUserEventTriggered(evt);
+        }
     }
 
     /**
@@ -120,6 +130,7 @@ public abstract class ApplicationProtocolNegotiationHandler extends ChannelInbou
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
         logger.warn("{} Failed to select the application-level protocol:", ctx.channel(), cause);
+        ctx.fireExceptionCaught(cause);
         ctx.close();
     }
 }

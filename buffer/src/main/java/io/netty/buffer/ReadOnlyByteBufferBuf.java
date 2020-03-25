@@ -15,8 +15,6 @@
  */
 package io.netty.buffer;
 
-import static java.util.Objects.requireNonNull;
-
 import io.netty.util.internal.StringUtil;
 
 import java.io.IOException;
@@ -196,11 +194,6 @@ class ReadOnlyByteBufferBuf extends AbstractReferenceCountedByteBuf {
     public ByteBuf getBytes(int index, byte[] dst, int dstIndex, int length) {
         checkDstIndex(index, length, dstIndex, dst.length);
 
-        if (dstIndex < 0 || dstIndex > dst.length - length) {
-            throw new IndexOutOfBoundsException(String.format(
-                    "dstIndex: %d, length: %d (expected: range(0, %d))", dstIndex, length, dst.length));
-        }
-
         ByteBuffer tmpBuf = internalNioBuffer();
         tmpBuf.clear().position(index).limit(index + length);
         tmpBuf.get(dst, dstIndex, length);
@@ -209,12 +202,10 @@ class ReadOnlyByteBufferBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuf getBytes(int index, ByteBuffer dst) {
-        checkIndex(index);
-        requireNonNull(dst, "dst");
+        checkIndex(index, dst.remaining());
 
-        int bytesToCopy = Math.min(capacity() - index, dst.remaining());
         ByteBuffer tmpBuf = internalNioBuffer();
-        tmpBuf.clear().position(index).limit(index + bytesToCopy);
+        tmpBuf.clear().position(index).limit(index + dst.remaining());
         dst.put(tmpBuf);
         return this;
     }
@@ -452,6 +443,7 @@ class ReadOnlyByteBufferBuf extends AbstractReferenceCountedByteBuf {
 
     @Override
     public ByteBuffer nioBuffer(int index, int length) {
+        checkIndex(index, length);
         return (ByteBuffer) buffer.duplicate().position(index).limit(index + length);
     }
 
@@ -459,6 +451,11 @@ class ReadOnlyByteBufferBuf extends AbstractReferenceCountedByteBuf {
     public ByteBuffer internalNioBuffer(int index, int length) {
         ensureAccessible();
         return (ByteBuffer) internalNioBuffer().clear().position(index).limit(index + length);
+    }
+
+    @Override
+    public final boolean isContiguous() {
+        return true;
     }
 
     @Override

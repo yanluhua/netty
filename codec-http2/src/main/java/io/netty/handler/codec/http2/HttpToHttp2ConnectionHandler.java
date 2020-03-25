@@ -45,6 +45,13 @@ public class HttpToHttp2ConnectionHandler extends Http2ConnectionHandler {
         this.validateHeaders = validateHeaders;
     }
 
+    protected HttpToHttp2ConnectionHandler(Http2ConnectionDecoder decoder, Http2ConnectionEncoder encoder,
+                                           Http2Settings initialSettings, boolean validateHeaders,
+                                           boolean decoupleCloseAndGoAway) {
+        super(decoder, encoder, initialSettings, decoupleCloseAndGoAway);
+        this.validateHeaders = validateHeaders;
+    }
+
     /**
      * Get the next stream id either from the {@link HttpHeaders} object or HTTP/2 codec
      *
@@ -103,8 +110,8 @@ public class HttpToHttp2ConnectionHandler extends Http2ConnectionHandler {
                 // Write the data
                 final ByteBuf content = ((HttpContent) msg).content();
                 endStream = isLastContent && trailers.isEmpty();
-                release = false;
                 encoder.writeData(ctx, currentStreamId, content, 0, endStream, promiseAggregator.newPromise());
+                release = false;
 
                 if (!trailers.isEmpty()) {
                     // Write trailing headers.

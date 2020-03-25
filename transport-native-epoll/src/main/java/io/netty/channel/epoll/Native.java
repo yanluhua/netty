@@ -15,7 +15,6 @@
  */
 package io.netty.channel.epoll;
 
-import io.netty.channel.unix.Errors.NativeIoException;
 import io.netty.channel.unix.FileDescriptor;
 import io.netty.channel.unix.Socket;
 import io.netty.util.internal.NativeLibraryLoader;
@@ -26,7 +25,6 @@ import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.IOException;
-import java.nio.channels.ClosedChannelException;
 import java.util.Locale;
 
 import static io.netty.channel.epoll.NativeStaticallyReferencedJniMethods.epollerr;
@@ -34,13 +32,12 @@ import static io.netty.channel.epoll.NativeStaticallyReferencedJniMethods.epolle
 import static io.netty.channel.epoll.NativeStaticallyReferencedJniMethods.epollin;
 import static io.netty.channel.epoll.NativeStaticallyReferencedJniMethods.epollout;
 import static io.netty.channel.epoll.NativeStaticallyReferencedJniMethods.epollrdhup;
+import static io.netty.channel.epoll.NativeStaticallyReferencedJniMethods.isSupportingRecvmmsg;
 import static io.netty.channel.epoll.NativeStaticallyReferencedJniMethods.isSupportingSendmmsg;
 import static io.netty.channel.epoll.NativeStaticallyReferencedJniMethods.isSupportingTcpFastopen;
 import static io.netty.channel.epoll.NativeStaticallyReferencedJniMethods.kernelVersion;
 import static io.netty.channel.epoll.NativeStaticallyReferencedJniMethods.tcpMd5SigMaxKeyLen;
-import static io.netty.channel.unix.Errors.ERRNO_EPIPE_NEGATIVE;
 import static io.netty.channel.unix.Errors.ioResult;
-import static io.netty.channel.unix.Errors.newConnectionResetException;
 import static io.netty.channel.unix.Errors.newIOException;
 
 /**
@@ -71,23 +68,11 @@ public final class Native {
     public static final int EPOLLERR = epollerr();
 
     public static final boolean IS_SUPPORTING_SENDMMSG = isSupportingSendmmsg();
+    static final boolean IS_SUPPORTING_RECVMMSG = isSupportingRecvmmsg();
+
     public static final boolean IS_SUPPORTING_TCP_FASTOPEN = isSupportingTcpFastopen();
     public static final int TCP_MD5SIG_MAXKEYLEN = tcpMd5SigMaxKeyLen();
     public static final String KERNEL_VERSION = kernelVersion();
-
-    private static final NativeIoException SENDMMSG_CONNECTION_RESET_EXCEPTION;
-    private static final NativeIoException SPLICE_CONNECTION_RESET_EXCEPTION;
-    private static final ClosedChannelException SENDMMSG_CLOSED_CHANNEL_EXCEPTION = ThrowableUtil.unknownStackTrace(
-            new ClosedChannelException(), Native.class, "sendmmsg(...)");
-    private static final ClosedChannelException SPLICE_CLOSED_CHANNEL_EXCEPTION = ThrowableUtil.unknownStackTrace(
-            new ClosedChannelException(), Native.class, "splice(...)");
-
-    static {
-        SENDMMSG_CONNECTION_RESET_EXCEPTION = newConnectionResetException("syscall:sendmmsg(...)",
-                ERRNO_EPIPE_NEGATIVE);
-        SPLICE_CONNECTION_RESET_EXCEPTION = newConnectionResetException("syscall:splice(...)",
-                ERRNO_EPIPE_NEGATIVE);
-    }
 
     public static FileDescriptor newEventFd() {
         return new FileDescriptor(eventFd());
@@ -109,6 +94,10 @@ public final class Native {
 
     private static native int epollCreate();
 
+    /**
+     * @deprecated this method is no longer supported. This functionality is internal to this package.
+     */
+    @Deprecated
     public static int epollWait(FileDescriptor epollFd, EpollEventArray events, FileDescriptor timerFd,
                                 int timeoutSec, int timeoutNs) throws IOException {
         int ready = epollWait0(epollFd.intValue(), events.memoryAddress(), events.length(), timerFd.intValue(),
@@ -118,7 +107,21 @@ public final class Native {
         }
         return ready;
     }
-    private static native int epollWait0(int efd, long address, int len, int timerFd, int timeoutSec, int timeoutNs);
+
+    static int epollWait(FileDescriptor epollFd, EpollEventArray events, boolean immediatePoll) throws IOException {
+        return epollWait(epollFd, events, immediatePoll ? 0 : -1);
+    }
+
+    /**
+     * This uses epoll's own timeout and does not reset/re-arm any timerfd
+     */
+    static int epollWait(FileDescriptor epollFd, EpollEventArray events, int timeoutMillis) throws IOException {
+        int ready = epollWait(epollFd.intValue(), events.memoryAddress(), events.length(), timeoutMillis);
+        if (ready < 0) {
+            throw newIOException("epoll_wait", ready);
+        }
+        return ready;
+    }
 
     /**
      * Non-blocking variant of
@@ -133,6 +136,8 @@ public final class Native {
         return ready;
     }
 
+    private static native int epollWait0(int efd, long address, int len, int timerFd, int timeoutSec, int timeoutNs);
+    private static native int epollWait(int efd, long address, int len, int timeout);
     private static native int epollBusyWait0(int efd, long address, int len);
 
     public static void epollCtlAdd(int efd, final int fd, final int flags) throws IOException {
@@ -141,7 +146,7 @@ public final class Native {
             throw newIOException("epoll_ctl", res);
         }
     }
-    private static native int epollCtlAdd0(int efd, final int fd, final int flags);
+    private static native int epollCtlAdd0(int efd, int fd, int flags);
 
     public static void epollCtlMod(int efd, final int fd, final int flags) throws IOException {
         int res = epollCtlMod0(efd, fd, flags);
@@ -149,7 +154,7 @@ public final class Native {
             throw newIOException("epoll_ctl", res);
         }
     }
-    private static native int epollCtlMod0(int efd, final int fd, final int flags);
+    private static native int epollCtlMod0(int efd, int fd, int flags);
 
     public static void epollCtlDel(int efd, final int fd) throws IOException {
         int res = epollCtlDel0(efd, fd);
@@ -157,30 +162,37 @@ public final class Native {
             throw newIOException("epoll_ctl", res);
         }
     }
-    private static native int epollCtlDel0(int efd, final int fd);
+    private static native int epollCtlDel0(int efd, int fd);
 
-    // File-descriptor operations
-    public static int splice(int fd, long offIn, int fdOut, long offOut, long len) throws IOException {
-        int res = splice0(fd, offIn, fdOut, offOut, len);
-        if (res >= 0) {
-            return res;
-        }
-        return ioResult("splice", res, SPLICE_CONNECTION_RESET_EXCEPTION, SPLICE_CLOSED_CHANNEL_EXCEPTION);
+    @Deprecated
+    public static int sendmmsg(int fd, NativeDatagramPacketArray.NativeDatagramPacket[] msgs,
+                               int offset, int len) throws IOException {
+        return sendmmsg(fd, Socket.isIPv6Preferred(), msgs, offset, len);
     }
 
-    private static native int splice0(int fd, long offIn, int fdOut, long offOut, long len);
-
-    public static int sendmmsg(
-            int fd, NativeDatagramPacketArray.NativeDatagramPacket[] msgs, int offset, int len) throws IOException {
-        int res = sendmmsg0(fd, msgs, offset, len);
+    static int sendmmsg(int fd, boolean ipv6, NativeDatagramPacketArray.NativeDatagramPacket[] msgs,
+                               int offset, int len) throws IOException {
+        int res = sendmmsg0(fd, ipv6, msgs, offset, len);
         if (res >= 0) {
             return res;
         }
-        return ioResult("sendmmsg", res, SENDMMSG_CONNECTION_RESET_EXCEPTION, SENDMMSG_CLOSED_CHANNEL_EXCEPTION);
+        return ioResult("sendmmsg", res);
     }
 
     private static native int sendmmsg0(
-            int fd, NativeDatagramPacketArray.NativeDatagramPacket[] msgs, int offset, int len);
+            int fd, boolean ipv6, NativeDatagramPacketArray.NativeDatagramPacket[] msgs, int offset, int len);
+
+    static int recvmmsg(int fd, boolean ipv6, NativeDatagramPacketArray.NativeDatagramPacket[] msgs,
+                        int offset, int len) throws IOException {
+        int res = recvmmsg0(fd, ipv6, msgs, offset, len);
+        if (res >= 0) {
+            return res;
+        }
+        return ioResult("recvmmsg", res);
+    }
+
+    private static native int recvmmsg0(
+            int fd, boolean ipv6, NativeDatagramPacketArray.NativeDatagramPacket[] msgs, int offset, int len);
 
     // epoll_event related
     public static native int sizeofEpollEvent();

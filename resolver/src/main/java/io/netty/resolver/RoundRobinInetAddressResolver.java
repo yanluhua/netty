@@ -19,7 +19,6 @@ import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
 import io.netty.util.concurrent.Promise;
-import io.netty.util.internal.UnstableApi;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -35,7 +34,6 @@ import java.util.concurrent.ThreadLocalRandom;
  * if multiple are returned by the {@link NameResolver}.
  * Use {@link #asAddressResolver()} to create a {@link InetSocketAddress} resolver
  */
-@UnstableApi
 public class RoundRobinInetAddressResolver extends InetNameResolver {
     private final NameResolver<InetAddress> nameResolver;
 
@@ -93,5 +91,10 @@ public class RoundRobinInetAddressResolver extends InetNameResolver {
 
     private static int randomIndex(int numAddresses) {
         return numAddresses == 1 ? 0 : ThreadLocalRandom.current().nextInt(numAddresses);
+    }
+
+    @Override
+    public void close() {
+        nameResolver.close();
     }
 }

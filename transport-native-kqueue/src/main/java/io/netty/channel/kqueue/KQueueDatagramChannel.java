@@ -308,7 +308,7 @@ public final class KQueueDatagramChannel extends AbstractKQueueChannel implement
             }
         } else if (data.nioBufferCount() > 1) {
             IovArray array = registration().cleanArray();
-            array.add(data);
+            array.add(data, data.readerIndex(), data.readableBytes());
             int cnt = array.count();
             assert cnt != 0;
 
@@ -371,6 +371,7 @@ public final class KQueueDatagramChannel extends AbstractKQueueChannel implement
     protected void doDisconnect() throws Exception {
         socket.disconnect();
         connected = active = false;
+        resetCachedAddresses();
     }
 
     @Override

@@ -289,7 +289,10 @@ public final class NetUtil {
                     }
                 }
             } catch (Exception e) {
-                logger.debug("Failed to get SOMAXCONN from sysctl and file {}. Default: {}", file, somaxconn, e);
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Failed to get SOMAXCONN from sysctl and file {}. Default: {}",
+                            file, somaxconn, e);
+                }
             } finally {
                 if (in != null) {
                     try {
@@ -316,10 +319,10 @@ public final class NetUtil {
             InputStreamReader isr = new InputStreamReader(is);
             try (BufferedReader br = new BufferedReader(isr)) {
                 String line = br.readLine();
-                if (line.startsWith(sysctlKey)) {
+                if (line != null && line.startsWith(sysctlKey)) {
                     for (int i = line.length() - 1; i > sysctlKey.length(); --i) {
                         if (!Character.isDigit(line.charAt(i))) {
-                            return Integer.valueOf(line.substring(i + 1, line.length()));
+                            return Integer.valueOf(line.substring(i + 1));
                         }
                     }
                 }

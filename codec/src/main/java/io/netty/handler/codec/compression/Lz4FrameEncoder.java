@@ -31,7 +31,6 @@ import io.netty.util.internal.ObjectUtil;
 import net.jpountz.lz4.LZ4Compressor;
 import net.jpountz.lz4.LZ4Exception;
 import net.jpountz.lz4.LZ4Factory;
-import net.jpountz.xxhash.XXHashFactory;
 
 import java.nio.ByteBuffer;
 import java.util.concurrent.TimeUnit;
@@ -50,7 +49,7 @@ import static io.netty.handler.codec.compression.Lz4Constants.MAGIC_NUMBER;
 import static io.netty.handler.codec.compression.Lz4Constants.MAX_BLOCK_SIZE;
 import static io.netty.handler.codec.compression.Lz4Constants.MIN_BLOCK_SIZE;
 import static io.netty.handler.codec.compression.Lz4Constants.TOKEN_OFFSET;
-import static io.netty.util.internal.ThrowableUtil.unknownStackTrace;
+
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -70,9 +69,6 @@ import static java.util.Objects.requireNonNull;
  *  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *     * * * * * * * * * *
  */
 public class Lz4FrameEncoder extends MessageToByteEncoder<ByteBuf> {
-    private static final EncoderException ENCODE_FINSHED_EXCEPTION = unknownStackTrace(new EncoderException(
-                    new IllegalStateException("encode finished and not enough space to write remaining data")),
-                    Lz4FrameEncoder.class, "encode");
     static final int DEFAULT_MAX_ENCODE_SIZE = Integer.MAX_VALUE;
 
     private final int blockSize;
@@ -130,8 +126,7 @@ public class Lz4FrameEncoder extends MessageToByteEncoder<ByteBuf> {
      *                        and is slower but compresses more efficiently
      */
     public Lz4FrameEncoder(boolean highCompressor) {
-        this(LZ4Factory.fastestInstance(), highCompressor, DEFAULT_BLOCK_SIZE,
-                XXHashFactory.fastestInstance().newStreamingHash32(DEFAULT_SEED).asChecksum());
+        this(LZ4Factory.fastestInstance(), highCompressor, DEFAULT_BLOCK_SIZE, new Lz4XXHash32(DEFAULT_SEED));
     }
 
     /**
@@ -243,7 +238,7 @@ public class Lz4FrameEncoder extends MessageToByteEncoder<ByteBuf> {
         if (finished) {
             if (!out.isWritable(in.readableBytes())) {
                 // out should be EMPTY_BUFFER because we should have allocated enough space above in allocateBuffer.
-                throw ENCODE_FINSHED_EXCEPTION;
+                throw new IllegalStateException("encode finished and not enough space to write remaining data");
             }
             out.writeBytes(in);
             return;

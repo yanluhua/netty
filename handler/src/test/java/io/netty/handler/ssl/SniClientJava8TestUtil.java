@@ -19,8 +19,8 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.MultithreadEventLoopGroup;
 import io.netty.channel.EventLoopGroup;
@@ -67,6 +67,7 @@ import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletionException;
 
 /**
  * In extra class to be able to run tests with java7 without trying to load classes that not exists in java7.
@@ -76,7 +77,7 @@ final class SniClientJava8TestUtil {
     private SniClientJava8TestUtil() { }
 
     static void testSniClient(SslProvider sslClientProvider, SslProvider sslServerProvider, final boolean match)
-            throws Exception {
+            throws Throwable {
         final String sniHost = "sni.netty.io";
         SelfSignedCertificate cert = new SelfSignedCertificate();
         LocalAddress address = new LocalAddress("test");
@@ -108,7 +109,7 @@ final class SniClientJava8TestUtil {
                     handler.engine().setSSLParameters(parameters);
 
                     ch.pipeline().addFirst(handler);
-                    ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                    ch.pipeline().addLast(new ChannelHandler() {
                         @Override
                         public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
                             if (evt instanceof SslHandshakeCompletionEvent) {
@@ -150,6 +151,8 @@ final class SniClientJava8TestUtil {
 
             promise.syncUninterruptibly();
             sslHandler.handshakeFuture().syncUninterruptibly();
+        } catch (CompletionException e) {
+            throw e.getCause();
         } finally {
             if (cc != null) {
                 cc.close().syncUninterruptibly();
@@ -261,7 +264,7 @@ final class SniClientJava8TestUtil {
                    IOException, CertificateException {
         return new SniX509KeyManagerFactory(
                 new SNIHostName(hostname), SslContext.buildKeyManagerFactory(
-                new X509Certificate[] { cert.cert() }, cert.key(), null, null));
+                new X509Certificate[] { cert.cert() }, cert.key(), null, null, null));
     }
 
     private static final class SniX509KeyManagerFactory extends KeyManagerFactory {

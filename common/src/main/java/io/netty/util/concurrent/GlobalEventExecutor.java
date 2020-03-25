@@ -17,6 +17,7 @@ package io.netty.util.concurrent;
 
 import static java.util.Objects.requireNonNull;
 
+import io.netty.util.internal.ThreadExecutorMap;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -36,7 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * task pending in the task queue for 1 second.  Please note it is not scalable to schedule large number of tasks to
  * this executor; use a dedicated executor.
  */
-public final class GlobalEventExecutor extends AbstractScheduledEventExecutor {
+public final class GlobalEventExecutor extends AbstractScheduledEventExecutor implements OrderedEventExecutor {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(GlobalEventExecutor.class);
 
@@ -61,8 +62,7 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor {
     // can trigger the creation of a thread from arbitrary thread groups; for this reason, the thread factory must not
     // be sticky about its thread group
     // visible for testing
-    final ThreadFactory threadFactory =
-            new DefaultThreadFactory(DefaultThreadFactory.toPoolName(getClass()), false, Thread.NORM_PRIORITY, null);
+    final ThreadFactory threadFactory;
     private final TaskRunner taskRunner = new TaskRunner();
     private final AtomicBoolean started = new AtomicBoolean();
     volatile Thread thread;
@@ -70,6 +70,8 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor {
     private final Future<?> terminationFuture = new FailedFuture<>(this, new UnsupportedOperationException());
 
     private GlobalEventExecutor() {
+        threadFactory = ThreadExecutorMap.apply(new DefaultThreadFactory(
+                DefaultThreadFactory.toPoolName(getClass()), false, Thread.NORM_PRIORITY, null), this);
     }
 
     /**
@@ -91,7 +93,7 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor {
                 return task;
             } else {
                 long delayNanos = scheduledTask.delayNanos();
-                Runnable task;
+                Runnable task = null;
                 if (delayNanos > 0) {
                     try {
                         task = taskQueue.poll(delayNanos, TimeUnit.NANOSECONDS);
@@ -99,11 +101,12 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor {
                         // Waken up.
                         return null;
                     }
-                } else {
-                    task = taskQueue.poll();
                 }
-
                 if (task == null) {
+                    // We need to fetch the scheduled tasks now as otherwise there may be a chance that
+                    // scheduled tasks are never executed if there is always one task in the taskQueue.
+                    // This is for example true for the read task of OIO Transport
+                    // See https://github.com/netty/netty/issues/1614
                     fetchFromScheduledTaskQueue();
                     task = taskQueue.poll();
                 }
